@@ -99,6 +99,7 @@ class MegaScript:
         self.SCENE_AFK_NAME = "Alt Tabbed"
         self.SCENE_GAME_NAME = "Game Capture"
         self.SCENE_DISCORD_NAME = "Discord Capture"
+        self.SCENE_DESKTOP_NAME = "Desktop Capture"
 
         self.SFX_RECORD_START = str(Path.joinpath(self.script_path, "assets", "recordingstartbeep.mp3"))
         self.SFX_RECORD_END = str(Path.joinpath(self.script_path, "assets", "recordingendbeep.mp3"))
@@ -321,9 +322,10 @@ class MegaScript:
         # best possible thing would be to find a magical "fullscreen" flag that is true when a window is fullscreen, false when it isnt
         # but dont know if this exists within windows
         
-        special_nongame_windows = [
-            "discord"
-        ]
+        special_windows_scenes = {
+            "discord": "Discord Capture",
+            "destiny": "Desktop Capture"
+        }
 
         def is_hWnd_fullscreen(rect, full_screen_rect):
             rect_size_x = rect[2]
@@ -351,7 +353,11 @@ class MegaScript:
                 exe_name = Path(proc.exe()).stem + ".exe"
                 class_name = win32gui.GetClassName(hWnd)
                 obs_window_str = f"{window_name}:{class_name}:{exe_name}"
-                special_app = any(window_name.lower() in obs_window_str.lower() for window_name in special_nongame_windows)
+                special_app_iterable = next((window_name for window_name in special_windows_scenes.keys() if window_name.lower() in obs_window_str.lower()), None)
+                special_app = special_app_iterable is not None
+                special_app_scene = None
+                if special_app:
+                    special_app_scene = special_windows_scenes[special_app_iterable]
                 fullscreen = is_hWnd_fullscreen(rect, full_screen_rect)
 
                 if fullscreen or special_app:
@@ -376,7 +382,8 @@ class MegaScript:
                                 "obs_window_str": obs_window_str,
                                 "focused": focused,
                                 "fullscreen": fullscreen,
-                                "special_app": special_app
+                                "special_app": special_app,
+                                "special_app_scene": special_app_scene
                             })
                             valid_windows_list[window_name] = window_info_dict
 
@@ -395,6 +402,10 @@ class MegaScript:
 
     def switcher(self):
         interval = self.switcher_poll_interval
+        self.special_windows_inputs = {
+            "discord": "Discord Window Capture",
+            "destiny": None
+        }
 
         while self.running:
             if not self.switcher_active:
@@ -444,24 +455,45 @@ class MegaScript:
                                 },
                                 overlay=True
                             )
-                        elif current_scene != self.SCENE_DISCORD_NAME and focused_special:
-                            # check to ensure discord is in the obs_window_str of at least 1 entry in the focused special list
-                            if any("discord" in window.get("obs_window_str").lower() for window in focused_special):
-                                if len(focused_special) == 1:
-                                    chosen_window = focused_special[0]
+                        elif focused_special:
+                            windows_with_scene = [w for w in focused_special if w.get("special_app_scene")]
+                            
+                            if windows_with_scene:
+                                if len(windows_with_scene) == 1:
+                                    chosen_window = windows_with_scene[0]
                                 else:
-                                    chosen_window = random.choice(focused_special)
-                                    self.logger.warning(f"Detected multiple focused special windows with 'discord' in their obs_window_str! Selected {chosen_window} to switch to at random.")
+                                    chosen_window = random.choice(windows_with_scene)
+                                    self.logger.warning(f"Detected multiple focused special windows! Selected {chosen_window.get('obs_window_str')} to switch to at random.")
                                 
-                            self.log_info_norepeat(f"Setting scene to {self.SCENE_DISCORD_NAME}, switching {self.SCENE_DISCORD_NAME} output to {chosen_window["obs_window_str"]}.")
-                            self.req.set_current_program_scene(self.SCENE_DISCORD_NAME)
-                            self.req.set_input_settings(
-                                name="Discord Window Capture", 
-                                settings={
-                                    "window": chosen_window["obs_window_str"]
-                                },
-                                overlay=True
-                            )
+                                target_scene = chosen_window.get("special_app_scene")
+                                
+                                # only switch if we're not already on the target scene
+                                if current_scene != target_scene:
+                                    special_app_name = None
+                                    special_windows_scenes = {
+                                        "discord": "Discord Capture",
+                                        "destiny": "Desktop Capture"
+                                    }
+                                    
+                                    for app in special_windows_scenes.keys():
+                                        if app.lower() in chosen_window.get("obs_window_str").lower():
+                                            special_app_name = app
+                                            break
+                                    
+                                    input_name = self.special_windows_inputs.get(special_app_name)
+                                    
+                                    self.log_info_norepeat(f"Setting scene to {target_scene}, switching {target_scene} output to {chosen_window['obs_window_str']}.")
+                                    self.req.set_current_program_scene(target_scene)
+                                    
+                                    # update the input source if we have a mapping for it
+                                    if input_name:
+                                        self.req.set_input_settings(
+                                            name=input_name, 
+                                            settings={
+                                                "window": chosen_window["obs_window_str"]
+                                            },
+                                            overlay=True
+                                        )
                         else:
                             pass
                             #self.log_info_norepeat("Valid focused windows detected but none matched criteria to switch scene!")
