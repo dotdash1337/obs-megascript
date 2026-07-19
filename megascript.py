@@ -420,83 +420,81 @@ class MegaScript:
                 current_scene = current_scene_data.scene_name
 
                 valid_windows = self.get_valid_windows()
-                
-                if valid_windows:
-                    # first obtain list of all focused windows
-                    # this SHOULD be only one window, but you never know
-                    focused_windows = [window for window in valid_windows.values() if window.get("focused")]
-                    chosen_window = None
+                # first obtain list of all focused windows
+                # this SHOULD be only one window, but you never know
+                focused_windows = [window for window in valid_windows.values() if window.get("focused")]
+                chosen_window = None
 
-                    if not focused_windows: 
-                        if current_scene != self.SCENE_AFK_NAME:
-                            self.log_info_norepeat(f"Setting scene to {self.SCENE_AFK_NAME}")
-                            self.req.set_current_program_scene(self.SCENE_AFK_NAME)
-                            self.afk_timer = int(time.time()) + self.buffer_timeout
-                    else:
-                        # separate focused windows out further into lists for special and non special focused windows
-                        focused_special = [window for window in focused_windows if window.get("special_app")]
-                        focused_notspecial = [window for window in focused_windows if not window.get("special_app")]
-                        # check game capture stuff first because we prioritize games over special windows
-                        # we only care about the non special focused windows here
-                        if current_scene != self.SCENE_GAME_NAME and focused_notspecial:
-                            if len(focused_notspecial) == 1:
-                                chosen_window = focused_notspecial[0]
-                            else:
-                                chosen_window = random.choice(focused_notspecial)
-                                self.logger.warning(f"Detected multiple focused nonspecial windows! Selected {chosen_window} to switch to at random.")
-
-                            self.log_info_norepeat(f"Setting scene to {self.SCENE_GAME_NAME}, switching {self.SCENE_GAME_NAME} output to {chosen_window["obs_window_str"]}.")
-                            self.req.set_current_program_scene(self.SCENE_GAME_NAME)
-                            self.req.set_input_settings(
-                                name="Capture 0", 
-                                settings={
-                                    "capture_mode": "window",
-                                    "window": chosen_window["obs_window_str"]
-                                },
-                                overlay=True
-                            )
-                        elif focused_special:
-                            windows_with_scene = [w for w in focused_special if w.get("special_app_scene")]
-                            
-                            if windows_with_scene:
-                                if len(windows_with_scene) == 1:
-                                    chosen_window = windows_with_scene[0]
-                                else:
-                                    chosen_window = random.choice(windows_with_scene)
-                                    self.logger.warning(f"Detected multiple focused special windows! Selected {chosen_window.get('obs_window_str')} to switch to at random.")
-                                
-                                target_scene = chosen_window.get("special_app_scene")
-                                
-                                # only switch if we're not already on the target scene
-                                if current_scene != target_scene:
-                                    special_app_name = None
-                                    special_windows_scenes = {
-                                        "discord": "Discord Capture",
-                                        "destiny": "Desktop Capture"
-                                    }
-                                    
-                                    for app in special_windows_scenes.keys():
-                                        if app.lower() in chosen_window.get("obs_window_str").lower():
-                                            special_app_name = app
-                                            break
-                                    
-                                    input_name = self.special_windows_inputs.get(special_app_name)
-                                    
-                                    self.log_info_norepeat(f"Setting scene to {target_scene}, switching {target_scene} output to {chosen_window['obs_window_str']}.")
-                                    self.req.set_current_program_scene(target_scene)
-                                    
-                                    # update the input source if we have a mapping for it
-                                    if input_name:
-                                        self.req.set_input_settings(
-                                            name=input_name, 
-                                            settings={
-                                                "window": chosen_window["obs_window_str"]
-                                            },
-                                            overlay=True
-                                        )
+                if not focused_windows: 
+                    if current_scene != self.SCENE_AFK_NAME:
+                        self.log_info_norepeat(f"Setting scene to {self.SCENE_AFK_NAME}")
+                        self.req.set_current_program_scene(self.SCENE_AFK_NAME)
+                        self.afk_timer = int(time.time()) + self.buffer_timeout
+                else:
+                    # separate focused windows out further into lists for special and non special focused windows
+                    focused_special = [window for window in focused_windows if window.get("special_app")]
+                    focused_notspecial = [window for window in focused_windows if not window.get("special_app")]
+                    # check game capture stuff first because we prioritize games over special windows
+                    # we only care about the non special focused windows here
+                    if current_scene != self.SCENE_GAME_NAME and focused_notspecial:
+                        if len(focused_notspecial) == 1:
+                            chosen_window = focused_notspecial[0]
                         else:
-                            pass
-                            #self.log_info_norepeat("Valid focused windows detected but none matched criteria to switch scene!")
+                            chosen_window = random.choice(focused_notspecial)
+                            self.logger.warning(f"Detected multiple focused nonspecial windows! Selected {chosen_window} to switch to at random.")
+
+                        self.log_info_norepeat(f"Setting scene to {self.SCENE_GAME_NAME}, switching {self.SCENE_GAME_NAME} output to {chosen_window["obs_window_str"]}.")
+                        self.req.set_current_program_scene(self.SCENE_GAME_NAME)
+                        self.req.set_input_settings(
+                            name="Capture 0", 
+                            settings={
+                                "capture_mode": "window",
+                                "window": chosen_window["obs_window_str"]
+                            },
+                            overlay=True
+                        )
+                    elif focused_special:
+                        windows_with_scene = [w for w in focused_special if w.get("special_app_scene")]
+                        
+                        if windows_with_scene:
+                            if len(windows_with_scene) == 1:
+                                chosen_window = windows_with_scene[0]
+                            else:
+                                chosen_window = random.choice(windows_with_scene)
+                                self.logger.warning(f"Detected multiple focused special windows! Selected {chosen_window.get('obs_window_str')} to switch to at random.")
+                            
+                            target_scene = chosen_window.get("special_app_scene")
+                            
+                            # only switch if we're not already on the target scene
+                            if current_scene != target_scene:
+                                special_app_name = None
+                                special_windows_scenes = {
+                                    "discord": "Discord Capture",
+                                    "destiny": "Desktop Capture"
+                                }
+                                
+                                for app in special_windows_scenes.keys():
+                                    if app.lower() in chosen_window.get("obs_window_str").lower():
+                                        special_app_name = app
+                                        break
+                                
+                                input_name = self.special_windows_inputs.get(special_app_name)
+                                
+                                self.log_info_norepeat(f"Setting scene to {target_scene}, switching {target_scene} output to {chosen_window['obs_window_str']}.")
+                                self.req.set_current_program_scene(target_scene)
+                                
+                                # update the input source if we have a mapping for it
+                                if input_name:
+                                    self.req.set_input_settings(
+                                        name=input_name, 
+                                        settings={
+                                            "window": chosen_window["obs_window_str"]
+                                        },
+                                        overlay=True
+                                    )
+                    else:
+                        pass
+                        #self.log_info_norepeat("Valid focused windows detected but none matched criteria to switch scene!")
                 
             except Exception as error:
                 self.handle_connection_lost(error)
