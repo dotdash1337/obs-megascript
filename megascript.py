@@ -91,6 +91,7 @@ class MegaScript:
         self.logger = logging.getLogger("obs-megascript")
         self.logger_last_msg = ""
 
+        self.commands_path = Path.joinpath(self.script_path, "commands.json")
         self.commands_observer = None
         self.commands_event = None
 
@@ -107,9 +108,21 @@ class MegaScript:
         self.SFX_COMMAND_RECEIVED = str(Path.joinpath(self.script_path, "assets", "commandreceived.mp3"))
 
         self.log_info_norepeat("Megascript initialized! Connecting to OBS...")
+        self.reset_commands_json()
         self.establish_connection()
         self.log_info_norepeat("Connected to OBS!")
 
+    def reset_commands_json(self):
+        try:
+            commands_data = None
+            with open(self.commands_path, "r") as f:
+                commands_data = json.load(f)
+            commands_data["toggleSwitcher"] = False
+            commands_data["instantReplay"] = False
+            with open(self.commands_path, "w") as f:
+                json.dump(commands_data, f)
+        except Exception as error:
+            self.logger.error(error)
 
     def log_info_norepeat(self, msg):
         if not msg == self.logger_last_msg:
@@ -167,6 +180,8 @@ class MegaScript:
                 self.logger.error(f"OBS connection failed but error is not an OBS error! (Instead instance of {type(error)}!) Reconnecting...")
             else:
                 self.logger.warning("OBS connection failed, reconnecting...")
+
+            self.reset_commands_json()
             self.establish_connection()
             
             # restart threads now that we're back online
@@ -600,10 +615,9 @@ class MegaScript:
 
                 elif event.event_type == 'modified':
                     if "commands.json" in event.src_path:
-                        commands_path = Path.joinpath(self.script_path, "commands.json")
                         commands_data = None
 
-                        with open(commands_path, "r") as f:
+                        with open(self.commands_path, "r") as f:
                             commands_data = json.load(f)
                             if commands_data["toggleSwitcher"]:
                                 playsound(self.SFX_COMMAND_RECEIVED)
@@ -617,7 +631,7 @@ class MegaScript:
                                 self.instant_replay()
                                 commands_data["instantReplay"] = False
                             
-                        with open(commands_path, "w") as f:
+                        with open(self.commands_path, "w") as f:
                             json.dump(commands_data, f)
 
         # start observer thread for commands
