@@ -139,7 +139,7 @@ class MegaScript:
                 time.sleep(self.connect_attempts_interval)
 
     def handle_connection_lost(self, error):
-        self.logger.exception(error)
+        self.logger.warning(error)
         if self.connected: # only trigger this once so we don't have multiple instances of establish_connection() running
             self.connected = False
             self.running = False
@@ -166,7 +166,7 @@ class MegaScript:
             if not isinstance(error, (obserror.OBSSDKError, obserror.OBSSDKRequestError, obserror.OBSSDKTimeoutError)):
                 self.logger.error(f"OBS connection failed but error is not an OBS error! (Instead instance of {type(error)}!) Reconnecting...")
             else:
-                self.logger.error("OBS connection failed, reconnecting...")
+                self.logger.warning("OBS connection failed, reconnecting...")
             self.establish_connection()
             
             # restart threads now that we're back online
@@ -291,15 +291,15 @@ class MegaScript:
                     shutil.move(filepath, correct_dir)
                     moved = True
                 else:
-                    self.logger.error(f"Error moving '{filepath}'. No application was detected as valid.")
+                    self.logger.warning(f"Error moving '{filepath}'. No application was detected as valid.")
 
             except Exception as error:
                 playsound(self.SFX_RECORD_ERROR)
                 self.logger.exception(error)
                 if moved:
-                    self.logger.error(f"Error moving '{filepath}'. File was moved from original location to '{correct_dir}'.")
+                    self.logger.warning(f"Error moving '{filepath}'. File was moved from original location to '{correct_dir}'.")
                 else:
-                    self.logger.error(f"Error moving '{filepath}'. File was NOT moved from original location.")
+                    self.logger.warning(f"Error moving '{filepath}'. File was NOT moved from original location.")
 
             self.log_info_norepeat(f"Succesfully saved original file '{filepath}' at '{correct_dir}'.")
             playsound(self.SFX_RECORD_END)
@@ -326,21 +326,10 @@ class MegaScript:
             "discord": "Discord Capture",
             "destiny": "Desktop Capture"
         }
-
-        def is_hWnd_fullscreen(rect, full_screen_rect):
-            rect_size_x = rect[2]
-            rect_size_y = rect[3]
-            fsr_size_x = full_screen_rect[2]
-            fsr_size_y = full_screen_rect[3]
-            fullscreen = False
-            
-            if rect_size_x >= fsr_size_x and rect_size_y >= fsr_size_y:
-                fullscreen = True
-
-            return fullscreen
+        valid_windows_list = {}
+        full_screen_rect = (0, 0, self.user32.GetSystemMetrics(0), self.user32.GetSystemMetrics(1))
 
         def win_enum_handler(hWnd, valid_windows_list):
-            full_screen_rect = valid_windows_list["full_screen_rect"]
             # below if statement does NOT mean the window is the one focused
             # this means the window has the visible bit set. 
             # this check is here to filter out weird windows that we don't care about
@@ -356,9 +345,18 @@ class MegaScript:
                 special_app_iterable = next((window_name for window_name in special_windows_scenes.keys() if window_name.lower() in obs_window_str.lower()), None)
                 special_app = special_app_iterable is not None
                 special_app_scene = None
+                
                 if special_app:
                     special_app_scene = special_windows_scenes[special_app_iterable]
-                fullscreen = is_hWnd_fullscreen(rect, full_screen_rect)
+
+                # determine if this hWnd is fullscreen
+                rect_size_x = rect[2]
+                rect_size_y = rect[3]
+                fsr_size_x = full_screen_rect[2]
+                fsr_size_y = full_screen_rect[3]
+                fullscreen = False
+                if rect_size_x >= fsr_size_x and rect_size_y >= fsr_size_y:
+                    fullscreen = True
 
                 if fullscreen or special_app:
                     focused = hWnd == win32gui.GetForegroundWindow()
@@ -388,12 +386,7 @@ class MegaScript:
                             valid_windows_list[window_name] = window_info_dict
 
         try:
-            valid_windows_list = {
-                "full_screen_rect": (0, 0, self.user32.GetSystemMetrics(0), self.user32.GetSystemMetrics(1))
-            }
             win32gui.EnumWindows(win_enum_handler, valid_windows_list)
-            # remove this because no other functions really need it and it was a massive headache to deal with otherwise
-            valid_windows_list.pop("full_screen_rect")
         except Exception as error:
             self.logger.error(error)
             return False
@@ -642,7 +635,7 @@ class MegaScript:
             while True:
                 time.sleep(1)
         except KeyboardInterrupt:
-            self.logger.info("Received KeyboardInterrupt, shutting down...")
+            self.logger.info("Shutting down due to KeyboardInterrupt...")
             self.running = False
             self.commands_observer.stop()
             self.commands_observer.join()
