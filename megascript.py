@@ -135,7 +135,7 @@ class MegaScript:
                 self.connected = True
                 self.log_info_norepeat("Reached end of establish connection loop..")
             except Exception as error:
-                self.log_info_norepeat(f"Errored out of loop with error: {error}")
+                self.log_info_norepeat(f"Could not establish connection due to: {error}")
                 time.sleep(self.connect_attempts_interval)
 
     def handle_connection_lost(self, error):
@@ -291,15 +291,15 @@ class MegaScript:
                     shutil.move(filepath, correct_dir)
                     moved = True
                 else:
-                    self.logger.warning(f"Error moving '{filepath}'. No application was detected as valid.")
+                    self.logger.warning(f"Could not move file '{filepath}'. No application was detected as valid.")
 
             except Exception as error:
                 playsound(self.SFX_RECORD_ERROR)
                 self.logger.exception(error)
                 if moved:
-                    self.logger.warning(f"Error moving '{filepath}'. File was moved from original location to '{correct_dir}'.")
+                    self.logger.warning(f"Could not move file '{filepath}'. File was moved from original location to '{correct_dir}'.")
                 else:
-                    self.logger.warning(f"Error moving '{filepath}'. File was NOT moved from original location.")
+                    self.logger.warning(f"Could not move file '{filepath}'. File was NOT moved from original location.")
 
             self.log_info_norepeat(f"Succesfully saved original file '{filepath}' at '{correct_dir}'.")
             playsound(self.SFX_RECORD_END)
