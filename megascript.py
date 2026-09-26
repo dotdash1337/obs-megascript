@@ -7,7 +7,7 @@ from pathlib import Path
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 from send2trash import send2trash
-import win32gui, win32process, time, threading, psutil, shutil, logging, re, os, json, subprocess, random
+import win32gui, win32process, time, threading, psutil, shutil, logging, re, os, json, subprocess
 
 class MegaScript:
 
@@ -448,7 +448,7 @@ class MegaScript:
                         if len(focused_notspecial) == 1:
                             chosen_window = focused_notspecial[0]
                         else:
-                            chosen_window = random.choice(focused_notspecial)
+                            chosen_window = choice(focused_notspecial)
                             self.logger.warning(f"Detected multiple focused nonspecial windows! Selected {chosen_window} to switch to at random.")
 
                         self.log_info_norepeat(f"Setting scene to {self.SCENE_GAME_NAME}, switching {self.SCENE_GAME_NAME} output to {chosen_window["obs_window_str"]}.")
@@ -468,7 +468,7 @@ class MegaScript:
                             if len(windows_with_scene) == 1:
                                 chosen_window = windows_with_scene[0]
                             else:
-                                chosen_window = random.choice(windows_with_scene)
+                                chosen_window = choice(windows_with_scene)
                                 self.logger.warning(f"Detected multiple focused special windows! Selected {chosen_window.get('obs_window_str')} to switch to at random.")
                             
                             target_scene = chosen_window.get("special_app_scene")
