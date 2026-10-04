@@ -16,7 +16,11 @@ class MegaScript:
         self.req = None
 
         self.textUpdateDelay = 2
-        self.emoticons = [
+        self.emote_gen = self.get_emote()
+
+        # define settings
+        # TODO: make these configurable with a gui application at some point, would be cool
+        self.EMOTICONS = [
             ":3",
             ":)",
             ":D",
@@ -30,7 +34,7 @@ class MegaScript:
             "3:",
             "c:"
         ]
-        self.banned_strings = [
+        self.BANNED_STRINGS = [
             "windows default lock screen",
             "windows.ui.core.corewindow",
             "lockapp.exe",
@@ -54,7 +58,23 @@ class MegaScript:
             "program manager",
             "sharex"
         ]
-        self.emote_gen = self.get_emote()
+        self.SPECIAL_WINDOW_SCENES = {
+            "discord": "Discord Capture",
+            "destiny": "Desktop Capture"
+        }
+        self.SPECIAL_WINDOWS_INPUTS = {
+            "discord": "Discord Window Capture",
+            "destiny": None
+        }
+        self.WINDOW_PROFILES = {
+            "16:9": ["valorant", "cs2", "siege", "deadlock"],
+            "current": ["discord"]
+        }
+        self.DEFAULT_PROFILE = "Ultrawide"
+        self.SCENE_AFK_NAME = "Alt Tabbed"
+        self.SCENE_GAME_NAME = "Game Capture"
+        self.SCENE_DISCORD_NAME = "Discord Capture"
+        self.SCENE_DESKTOP_NAME = "Desktop Capture"
 
         self.user32 = ct.windll.user32
         self.user32.SetProcessDPIAware()
@@ -96,11 +116,6 @@ class MegaScript:
         self.commands_event = None
 
         self.instant_replay_requested = False
-
-        self.SCENE_AFK_NAME = "Alt Tabbed"
-        self.SCENE_GAME_NAME = "Game Capture"
-        self.SCENE_DISCORD_NAME = "Discord Capture"
-        self.SCENE_DESKTOP_NAME = "Desktop Capture"
 
         self.SFX_RECORD_START = str(Path.joinpath(self.script_path, "assets", "recordingstartbeep.mp3"))
         self.SFX_RECORD_END = str(Path.joinpath(self.script_path, "assets", "recordingendbeep.mp3"))
@@ -282,8 +297,8 @@ class MegaScript:
                     else:
                         # no windows are focused, but we have valid windows still
                         # go through all nonspecial window names first and try to match them against a directory
-                        nonspecial_names = [window.get("obs_window_str") for window in valid_windows.values() if not window.get("special_app")]
-                        special_names = [window.get("obs_window_str") for window in valid_windows.values() if window.get("special_app")]
+                        nonspecial_names = [window.get("obs_window_str") for window in valid_windows.values() if not window.get("special_scene")]
+                        special_names = [window.get("obs_window_str") for window in valid_windows.values() if window.get("special_scene")]
                         dir_nonspecial, name_nonspecial = self.check_names_against_dir(nonspecial_names, recording_dir)
                         dir_special, name_special = self.check_names_against_dir(special_names, recording_dir)
                         if dir_nonspecial:
@@ -323,24 +338,6 @@ class MegaScript:
         # a "valid window" is defined by a window that is:
         # fullscreen (does NOT have to be focused)
         # or a window that matches the "special windows" list of strings
-
-        # list is here to determine any windows that we should ALWAYS return in the list
-        # regardless of if they are fullscreen or not
-
-        # TODO: valorant currently sets its window rect to -32000 -32000 -31000 -31000 when it is alt tabbed.
-        # this breaks this code because i assume windows will be at their normal pos and width/height even if they are not focused.
-        # therefore need to find better way of doing this.
-        # currently, best idea i have is to implement a "priority" system for special windows
-        # set discord to lowest priority and valorant to highest priority
-        # then in switcher and handle_saved_file, go through special windows in order of priority
-        # this would probably fix it but it is a bit of a bandaid fix
-        # best possible thing would be to find a magical "fullscreen" flag that is true when a window is fullscreen, false when it isnt
-        # but dont know if this exists within windows
-        
-        special_windows_scenes = {
-            "discord": "Discord Capture",
-            "destiny": "Desktop Capture"
-        }
         valid_windows_list = {}
         full_screen_rect = (0, 0, self.user32.GetSystemMetrics(0), self.user32.GetSystemMetrics(1))
 
@@ -357,13 +354,20 @@ class MegaScript:
                 exe_name = Path(proc.exe()).stem + ".exe"
                 class_name = win32gui.GetClassName(hWnd)
                 obs_window_str = f"{window_name}:{class_name}:{exe_name}"
-                special_app_iterable = next((window_name for window_name in special_windows_scenes.keys() if window_name.lower() in obs_window_str.lower()), None)
-                special_app = special_app_iterable is not None
-                special_app_scene = None
-                
-                if special_app:
-                    special_app_scene = special_windows_scenes[special_app_iterable]
+                special_scene = None
+                profile = self.DEFAULT_PROFILE
 
+                for special_window_name, scene_name in self.SPECIAL_WINDOW_SCENES.items():
+                    if special_window_name.lower() in obs_window_str.lower():
+                        special_scene = scene_name
+                        break
+
+                for profile_name, profile_window_name_list in self.WINDOW_PROFILES.items():
+                    for profile_window_name in profile_window_name_list:
+                        if profile_window_name.lower() in obs_window_str.lower():
+                            profile = profile_name
+                            break
+                
                 # determine if this hWnd is fullscreen
                 rect_size_x = rect[2]
                 rect_size_y = rect[3]
@@ -373,14 +377,14 @@ class MegaScript:
                 if rect_size_x >= fsr_size_x and rect_size_y >= fsr_size_y:
                     fullscreen = True
 
-                if fullscreen or special_app:
+                if fullscreen or special_scene:
                     focused = hWnd == win32gui.GetForegroundWindow()
 
                     if window_name != "":
                         window_info_dict = {}
                         window_str_safe = True
 
-                        for banned_str in self.banned_strings:
+                        for banned_str in self.BANNED_STRINGS:
                             if banned_str.lower() in obs_window_str.lower():
                                 window_str_safe = False
 
@@ -395,8 +399,8 @@ class MegaScript:
                                 "obs_window_str": obs_window_str,
                                 "focused": focused,
                                 "fullscreen": fullscreen,
-                                "special_app": special_app,
-                                "special_app_scene": special_app_scene
+                                "special_scene": special_scene,
+                                "profile": profile
                             })
                             valid_windows_list[window_name] = window_info_dict
 
@@ -410,10 +414,22 @@ class MegaScript:
 
     def switcher(self):
         interval = self.switcher_poll_interval
-        self.special_windows_inputs = {
-            "discord": "Discord Window Capture",
-            "destiny": None
-        }
+
+        def profile_switcher(new_profile_name):
+            profile_data = self.req.get_profile_list()
+            current_profile_name = profile_data.current_profile_name
+            profile_list = profile_data.profiles
+            buffer_active = self.req.get_replay_buffer_status().output_active
+
+            if new_profile_name != current_profile_name and new_profile_name in profile_list:
+                if buffer_active:
+                    self.req.stop_replay_buffer()
+                    # wait for the buffer to stop before switching profiles
+                    while buffer_active:
+                        buffer_active = self.req.get_replay_buffer_status().output_active
+                        time.sleep(interval)
+                self.req.set_current_profile(new_profile_name)
+                self.logger.debug(f"Updated profile from {current_profile_name} to {new_profile_name}.")
 
         while self.running:
             if not self.switcher_active:
@@ -435,13 +451,13 @@ class MegaScript:
 
                 if not focused_windows: 
                     if current_scene != self.SCENE_AFK_NAME:
-                        self.log_info_norepeat(f"Setting scene to {self.SCENE_AFK_NAME}")
+                        self.logger.debug(f"Setting scene to {self.SCENE_AFK_NAME}.")
                         self.req.set_current_program_scene(self.SCENE_AFK_NAME)
                         self.afk_timer = int(time.time()) + self.buffer_timeout
                 else:
                     # separate focused windows out further into lists for special and non special focused windows
-                    focused_special = [window for window in focused_windows if window.get("special_app")]
-                    focused_notspecial = [window for window in focused_windows if not window.get("special_app")]
+                    focused_special = [window for window in focused_windows if window.get("special_scene")]
+                    focused_notspecial = [window for window in focused_windows if not window.get("special_scene")]
                     # check game capture stuff first because we prioritize games over special windows
                     # we only care about the non special focused windows here
                     if current_scene != self.SCENE_GAME_NAME and focused_notspecial:
@@ -451,7 +467,6 @@ class MegaScript:
                             chosen_window = choice(focused_notspecial)
                             self.logger.warning(f"Detected multiple focused nonspecial windows! Selected {chosen_window} to switch to at random.")
 
-                        self.log_info_norepeat(f"Setting scene to {self.SCENE_GAME_NAME}, switching {self.SCENE_GAME_NAME} output to {chosen_window["obs_window_str"]}.")
                         self.req.set_current_program_scene(self.SCENE_GAME_NAME)
                         self.req.set_input_settings(
                             name="Capture 0", 
@@ -461,8 +476,10 @@ class MegaScript:
                             },
                             overlay=True
                         )
+
+                        self.logger.debug(f"Set scene to {self.SCENE_GAME_NAME}, swapped {self.SCENE_GAME_NAME} output to {chosen_window["obs_window_str"]}.")
                     elif focused_special:
-                        windows_with_scene = [w for w in focused_special if w.get("special_app_scene")]
+                        windows_with_scene = [w for w in focused_special if w.get("special_scene")]
                         
                         if windows_with_scene:
                             if len(windows_with_scene) == 1:
@@ -471,24 +488,18 @@ class MegaScript:
                                 chosen_window = choice(windows_with_scene)
                                 self.logger.warning(f"Detected multiple focused special windows! Selected {chosen_window.get('obs_window_str')} to switch to at random.")
                             
-                            target_scene = chosen_window.get("special_app_scene")
+                            target_scene = chosen_window.get("special_scene")
                             
                             # only switch if we're not already on the target scene
                             if current_scene != target_scene:
                                 special_app_name = None
-                                special_windows_scenes = {
-                                    "discord": "Discord Capture",
-                                    "destiny": "Desktop Capture"
-                                }
                                 
-                                for app in special_windows_scenes.keys():
+                                for app in self.SPECIAL_WINDOW_SCENES.keys():
                                     if app.lower() in chosen_window.get("obs_window_str").lower():
                                         special_app_name = app
                                         break
                                 
-                                input_name = self.special_windows_inputs.get(special_app_name)
-                                
-                                self.log_info_norepeat(f"Setting scene to {target_scene}, switching {target_scene} output to {chosen_window['obs_window_str']}.")
+                                input_name = self.SPECIAL_WINDOWS_INPUTS.get(special_app_name)
                                 self.req.set_current_program_scene(target_scene)
                                 
                                 # update the input source if we have a mapping for it
@@ -500,9 +511,11 @@ class MegaScript:
                                         },
                                         overlay=True
                                     )
-                    else:
-                        pass
-                        #self.log_info_norepeat("Valid focused windows detected but none matched criteria to switch scene!")
+                                self.logger.debug(f"Setting scene to {target_scene}, switching {target_scene} output to {chosen_window['obs_window_str']}.")
+                
+                # handle profile switching here
+                if chosen_window:
+                    profile_switcher(chosen_window["profile"])
                 
             except Exception as error:
                 self.handle_connection_lost(error)
@@ -534,7 +547,7 @@ class MegaScript:
     def get_emote(self):
         previous_emote = None
         while True:
-            emote = choice(self.emoticons)
+            emote = choice(self.EMOTICONS)
             if emote != previous_emote:
                 yield emote
                 previous_emote = emote
