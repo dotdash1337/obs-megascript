@@ -105,7 +105,7 @@ class MegaScript:
             filemode="a",
             format='%(asctime)s %(levelname)s %(module)s - %(funcName)s: %(message)s',
             datefmt='%Y-%m-%d %I:%M:%S %p',
-            level=logging.INFO
+            level=logging.WARNING
         )
         logging.getLogger("obsws_python").setLevel(logging.CRITICAL)
         self.logger = logging.getLogger("obs-megascript")
@@ -137,11 +137,14 @@ class MegaScript:
             with open(self.commands_path, "w") as f:
                 json.dump(commands_data, f)
         except Exception as error:
-            self.logger.error(error)
+            self.logger.exception("Error while resetting commands.json!")
 
-    def log_info_norepeat(self, msg):
+    def log_info_norepeat(self, msg, error=None):
         if not msg == self.logger_last_msg:
-            self.logger.info(msg)
+            if error:
+                self.logger.info(msg, exc_info=error)
+            else:
+                self.logger.info(msg)
         self.logger_last_msg = msg
 
     def establish_connection(self):
@@ -161,13 +164,11 @@ class MegaScript:
                 #self.evt.callback.register(self.on_replay_buffer_state_changed)
                 self.evt.callback.register(self.on_record_state_changed)
                 self.connected = True
-                self.log_info_norepeat("Reached end of establish connection loop..")
             except Exception as error:
-                self.log_info_norepeat(f"Could not establish connection due to: {error}")
+                self.log_info_norepeat(f"Could not establish connection to OBS!", error=error)
                 time.sleep(self.connect_attempts_interval)
 
     def handle_connection_lost(self, error):
-        self.logger.warning(error)
         if self.connected: # only trigger this once so we don't have multiple instances of establish_connection() running
             self.connected = False
             self.running = False
@@ -192,9 +193,9 @@ class MegaScript:
                 self.switcher_thread = None
             
             if not isinstance(error, (obserror.OBSSDKError, obserror.OBSSDKRequestError, obserror.OBSSDKTimeoutError)):
-                self.logger.error(f"OBS connection failed but error is not an OBS error! (Instead instance of {type(error)}!) Reconnecting...")
+                self.logger.error(f"OBS connection failed but error is not an OBS error! Reconnecting...", exc_info=error)
             else:
-                self.logger.warning("OBS connection failed, reconnecting...")
+                self.logger.warning("OBS connection failed, reconnecting...", exc_info=error)
 
             self.reset_commands_json()
             self.establish_connection()
@@ -281,7 +282,7 @@ class MegaScript:
                 send2trash(filepath)
                 self.log_info_norepeat(f"Sent {filepath} to trash after user exited instant replay successfully!")
             except Exception as error:
-                self.logger.error(error)
+                self.logger.exception(f"Error with sending {filepath} to trash!")
         else:
             try:
                 if valid_windows:
@@ -407,7 +408,7 @@ class MegaScript:
         try:
             win32gui.EnumWindows(win_enum_handler, valid_windows_list)
         except Exception as error:
-            self.logger.error(error)
+            self.logger.exception("Error while enumerating windows to use in valid windows list!")
             return False
         
         return valid_windows_list
@@ -429,7 +430,7 @@ class MegaScript:
                         buffer_active = self.req.get_replay_buffer_status().output_active
                         time.sleep(interval)
                 self.req.set_current_profile(new_profile_name)
-                self.logger.debug(f"Updated profile from {current_profile_name} to {new_profile_name}.")
+                self.log_info_norepeat(f"Updated profile from {current_profile_name} to {new_profile_name}.")
 
         while self.running:
             if not self.switcher_active:
@@ -451,7 +452,7 @@ class MegaScript:
 
                 if not focused_windows: 
                     if current_scene != self.SCENE_AFK_NAME:
-                        self.logger.debug(f"Setting scene to {self.SCENE_AFK_NAME}.")
+                        self.log_info_norepeat(f"Setting scene to {self.SCENE_AFK_NAME}.")
                         self.req.set_current_program_scene(self.SCENE_AFK_NAME)
                         self.afk_timer = int(time.time()) + self.buffer_timeout
                 else:
@@ -477,7 +478,7 @@ class MegaScript:
                             overlay=True
                         )
 
-                        self.logger.debug(f"Set scene to {self.SCENE_GAME_NAME}, swapped {self.SCENE_GAME_NAME} output to {chosen_window["obs_window_str"]}.")
+                        self.log_info_norepeat(f"Set scene to {self.SCENE_GAME_NAME}, swapped {self.SCENE_GAME_NAME} output to {chosen_window["obs_window_str"]}.")
                     elif focused_special:
                         windows_with_scene = [w for w in focused_special if w.get("special_scene")]
                         
@@ -511,7 +512,7 @@ class MegaScript:
                                         },
                                         overlay=True
                                     )
-                                self.logger.debug(f"Setting scene to {target_scene}, switching {target_scene} output to {chosen_window['obs_window_str']}.")
+                                self.log_info_norepeat(f"Setting scene to {target_scene}, switching {target_scene} output to {chosen_window['obs_window_str']}.")
                 
                 # handle profile switching here
                 if chosen_window:
@@ -582,9 +583,9 @@ class MegaScript:
             else:
                 playsound(self.SFX_RECORD_ERROR)
                 if not buffer_active:
-                    self.log_info_norepeat("Cannot show instant replay; replay buffer inactive!")
+                    self.logger.warning("Cannot show instant replay; replay buffer inactive!")
                 elif self.instant_replay_requested:
-                    self.log_info_norepeat("Cannot show instant replay; one was already requested recently!")
+                    self.logger.warning("Cannot show instant replay; one was already requested recently!")
         except Exception as error:
             self.handle_connection_lost(error)
 
