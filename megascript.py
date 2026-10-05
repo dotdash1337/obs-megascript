@@ -15,7 +15,7 @@ class MegaScript:
         self.evt = None
         self.req = None
 
-        self.textUpdateDelay = 2
+        self.text_update_delay = 2
         self.emote_gen = self.get_emote()
 
         # define settings
@@ -67,17 +67,19 @@ class MegaScript:
             "destiny": None
         }
         self.WINDOW_PROFILES = {
-            "16:9": ["valorant", "cs2", "siege", "deadlock"],
+            "300FPS": ["valorant", "cs2", "siege"],
             "current": ["discord"]
         }
-        self.DEFAULT_PROFILE = "Ultrawide"
+        self.DEFAULT_PROFILE = "120FPS"
         self.SCENE_AFK_NAME = "Alt Tabbed"
         self.SCENE_GAME_NAME = "Game Capture"
         self.SCENE_DISCORD_NAME = "Discord Capture"
         self.SCENE_DESKTOP_NAME = "Desktop Capture"
 
         self.user32 = ct.windll.user32
-        self.user32.SetProcessDPIAware()
+        # set dpi awareness to per-monitor mode: 
+        # this fixes weird output from windows's DPI scaling
+        ct.windll.shcore.SetProcessDpiAwareness(2)
 
         self.connect_attempts_interval = 5
 
@@ -107,6 +109,7 @@ class MegaScript:
             datefmt='%Y-%m-%d %I:%M:%S %p',
             level=logging.WARNING
         )
+        # disable base obsws_python logging
         logging.getLogger("obsws_python").setLevel(logging.CRITICAL)
         self.logger = logging.getLogger("obs-megascript")
         self.logger_last_msg = ""
@@ -125,6 +128,8 @@ class MegaScript:
         self.log_info_norepeat("Megascript initialized! Connecting to OBS...")
         self.reset_commands_json()
         self.establish_connection()
+        self.profile_switcher(self.DEFAULT_PROFILE)
+        self.manage_resolution()
         self.log_info_norepeat("Connected to OBS!")
 
     def reset_commands_json(self):
@@ -195,10 +200,12 @@ class MegaScript:
             if not isinstance(error, (obserror.OBSSDKError, obserror.OBSSDKRequestError, obserror.OBSSDKTimeoutError)):
                 self.logger.error(f"OBS connection failed but error is not an OBS error! Reconnecting...", exc_info=error)
             else:
-                self.logger.warning("OBS connection failed, reconnecting...", exc_info=error)
+                self.logger.warning("OBS connection failed, reconnecting...")
 
             self.reset_commands_json()
             self.establish_connection()
+            self.profile_switcher(self.DEFAULT_PROFILE)
+            self.manage_resolution()
             
             # restart threads now that we're back online
             self.running = True
@@ -336,6 +343,16 @@ class MegaScript:
             playsound(self.SFX_RECORD_END)
     
     def get_valid_windows(self):
+        # TODO: valorant currently sets its window rect to -32000 -32000 -31000 -31000 when it is alt tabbed.
+        # this breaks this code because i assume windows will be at their normal pos and width/height even if they are not focused.
+        # therefore need to find better way of doing this.
+        # currently, best idea i have is to implement a "priority" system for special windows
+        # set discord to lowest priority and valorant to highest priority
+        # then in switcher and handle_saved_file, go through special windows in order of priority
+        # this would probably fix it but it is a bit of a bandaid fix
+        # best possible thing would be to find a magical "fullscreen" flag that is true when a window is fullscreen, false when it isnt
+        # but dont know if this exists within windows
+
         # a "valid window" is defined by a window that is:
         # fullscreen (does NOT have to be focused)
         # or a window that matches the "special windows" list of strings
@@ -346,64 +363,64 @@ class MegaScript:
             # below if statement does NOT mean the window is the one focused
             # this means the window has the visible bit set. 
             # this check is here to filter out weird windows that we don't care about
-            if win32gui.IsWindowVisible(hWnd):
-                # setup the data we care about for our window
-                rect = win32gui.GetWindowRect(hWnd)
-                window_name = win32gui.GetWindowText(hWnd)
-                tid, pid = win32process.GetWindowThreadProcessId(hWnd) # first var is thread id, second var is process id
-                proc = psutil.Process(pid)
-                exe_name = Path(proc.exe()).stem + ".exe"
-                class_name = win32gui.GetClassName(hWnd)
-                obs_window_str = f"{window_name}:{class_name}:{exe_name}"
-                special_scene = None
-                profile = self.DEFAULT_PROFILE
+            if not win32gui.IsWindowVisible(hWnd):
+                return
+            
+            # setup the data we care about for our window
+            rect = win32gui.GetWindowRect(hWnd)
+            window_name = win32gui.GetWindowText(hWnd)
+            tid, pid = win32process.GetWindowThreadProcessId(hWnd) # first var is thread id, second var is process id
+            proc = psutil.Process(pid)
+            exe_name = Path(proc.exe()).stem + ".exe"
+            class_name = win32gui.GetClassName(hWnd)
+            obs_window_str = f"{window_name}:{class_name}:{exe_name}"
+            special_scene = None
+            profile = self.DEFAULT_PROFILE
 
-                for special_window_name, scene_name in self.SPECIAL_WINDOW_SCENES.items():
-                    if special_window_name.lower() in obs_window_str.lower():
-                        special_scene = scene_name
+            for special_window_name, scene_name in self.SPECIAL_WINDOW_SCENES.items():
+                if special_window_name.lower() in obs_window_str.lower():
+                    special_scene = scene_name
+                    break
+
+            for profile_name, profile_window_name_list in self.WINDOW_PROFILES.items():
+                for profile_window_name in profile_window_name_list:
+                    if profile_window_name.lower() in obs_window_str.lower():
+                        profile = profile_name
                         break
+            
+            # determine if this hWnd is fullscreen
+            rect_size_x = rect[2]
+            rect_size_y = rect[3]
+            fsr_size_x = full_screen_rect[2]
+            fsr_size_y = full_screen_rect[3]
+            fullscreen = False
+            if rect_size_x >= fsr_size_x and rect_size_y >= fsr_size_y:
+                fullscreen = True
 
-                for profile_name, profile_window_name_list in self.WINDOW_PROFILES.items():
-                    for profile_window_name in profile_window_name_list:
-                        if profile_window_name.lower() in obs_window_str.lower():
-                            profile = profile_name
-                            break
-                
-                # determine if this hWnd is fullscreen
-                rect_size_x = rect[2]
-                rect_size_y = rect[3]
-                fsr_size_x = full_screen_rect[2]
-                fsr_size_y = full_screen_rect[3]
-                fullscreen = False
-                if rect_size_x >= fsr_size_x and rect_size_y >= fsr_size_y:
-                    fullscreen = True
+            # check against banned strings
+            window_str_safe = True
+            for banned_str in self.BANNED_STRINGS:
+                if banned_str.lower() in obs_window_str.lower():
+                    window_str_safe = False
 
-                if fullscreen or special_scene:
-                    focused = hWnd == win32gui.GetForegroundWindow()
+            focused = hWnd == win32gui.GetForegroundWindow()
+            window_info_dict = {}
 
-                    if window_name != "":
-                        window_info_dict = {}
-                        window_str_safe = True
-
-                        for banned_str in self.BANNED_STRINGS:
-                            if banned_str.lower() in obs_window_str.lower():
-                                window_str_safe = False
-
-                        if window_str_safe:
-                            window_info_dict.update({
-                                "hWnd": hWnd,
-                                "tid": tid,
-                                "pid": pid,
-                                "proc": proc,
-                                "exe_name": exe_name,
-                                "class_name": class_name,
-                                "obs_window_str": obs_window_str,
-                                "focused": focused,
-                                "fullscreen": fullscreen,
-                                "special_scene": special_scene,
-                                "profile": profile
-                            })
-                            valid_windows_list[window_name] = window_info_dict
+            if (fullscreen or special_scene) and (window_name != "") and window_str_safe:
+                window_info_dict.update({
+                    "hWnd": hWnd,
+                    "tid": tid,
+                    "pid": pid,
+                    "proc": proc,
+                    "exe_name": exe_name,
+                    "class_name": class_name,
+                    "obs_window_str": obs_window_str,
+                    "focused": focused,
+                    "fullscreen": fullscreen,
+                    "special_scene": special_scene,
+                    "profile": profile
+                })
+                valid_windows_list[window_name] = window_info_dict
 
         try:
             win32gui.EnumWindows(win_enum_handler, valid_windows_list)
@@ -414,23 +431,9 @@ class MegaScript:
         return valid_windows_list
 
     def switcher(self):
+        # TODO: fix the abysmal scope pyramid/tabbing issue in this fn
+
         interval = self.switcher_poll_interval
-
-        def profile_switcher(new_profile_name):
-            profile_data = self.req.get_profile_list()
-            current_profile_name = profile_data.current_profile_name
-            profile_list = profile_data.profiles
-            buffer_active = self.req.get_replay_buffer_status().output_active
-
-            if new_profile_name != current_profile_name and new_profile_name in profile_list:
-                if buffer_active:
-                    self.req.stop_replay_buffer()
-                    # wait for the buffer to stop before switching profiles
-                    while buffer_active:
-                        buffer_active = self.req.get_replay_buffer_status().output_active
-                        time.sleep(interval)
-                self.req.set_current_profile(new_profile_name)
-                self.log_info_norepeat(f"Updated profile from {current_profile_name} to {new_profile_name}.")
 
         while self.running:
             if not self.switcher_active:
@@ -516,15 +519,63 @@ class MegaScript:
                 
                 # handle profile switching here
                 if chosen_window:
-                    profile_switcher(chosen_window["profile"])
+                    self.profile_switcher(chosen_window["profile"])
                 
             except Exception as error:
                 self.handle_connection_lost(error)
             
             self.manage_buffer_state()
+
+            self.manage_resolution()
             
             time.sleep(interval)
             continue
+
+    def profile_switcher(self, new_profile_name):
+        try:
+            interval = self.switcher_poll_interval
+            profile_data = self.req.get_profile_list()
+            current_profile_name = profile_data.current_profile_name
+            profile_list = profile_data.profiles
+            buffer_active = self.req.get_replay_buffer_status().output_active
+
+            if new_profile_name != current_profile_name and new_profile_name in profile_list:
+                if buffer_active:
+                    self.req.stop_replay_buffer()
+                    # wait for the buffer to stop before switching profiles
+                    while buffer_active:
+                        buffer_active = self.req.get_replay_buffer_status().output_active
+                        time.sleep(interval)
+                self.req.set_current_profile(new_profile_name)
+                self.log_info_norepeat(f"Updated profile from {current_profile_name} to {new_profile_name}.")
+        except Exception as error:
+            self.handle_connection_lost(error)
+
+    def manage_resolution(self):
+        # get width and height of current display
+        mon_width = self.user32.GetSystemMetrics(0)
+        mon_height = self.user32.GetSystemMetrics(1)
+
+        try:
+            video_settings = self.req.get_video_settings()
+            obs_width = video_settings.base_width
+            obs_height = video_settings.base_height
+
+            width_same = mon_width == obs_width
+            height_same = mon_height == obs_height
+            if (not width_same) or (not height_same):
+                self.req.set_video_settings(
+                    base_width=mon_width, 
+                    base_height=mon_height,
+                    out_width = mon_width,
+                    out_height=mon_height,
+                    # leave fps alone
+                    numerator=video_settings.fps_numerator, denominator=video_settings.fps_denominator
+                    )
+                self.log_info_norepeat(f"Updated OBS output from ({obs_width} x {obs_height}) to ({mon_width} x {mon_height}).")
+
+        except Exception as error:
+            self.handle_connection_lost(error)
 
     def manage_buffer_state(self):
         try:
@@ -601,6 +652,7 @@ class MegaScript:
             self.switcher_thread.start()
 
         # create event handler for commands
+        # TODO: move this to its own file
         class CommandsEvent(FileSystemEventHandler):
             def __init__(self):
                 super().__init__()
