@@ -10,7 +10,7 @@ from send2trash import send2trash
 import win32gui, win32process, time, threading, psutil, shutil, logging, re, os, json, subprocess
 
 class MegaScript:
-    
+
     def __init__(self):
         self.evt = None
         self.req = None
@@ -645,7 +645,6 @@ class MegaScript:
             self.switcher_thread.start()
 
         # create event handler for commands
-        # TODO: move this to its own file
         class CommandsEvent(FileSystemEventHandler):
             def __init__(self):
                 super().__init__()
