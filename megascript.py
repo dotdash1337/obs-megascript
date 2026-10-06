@@ -531,21 +531,24 @@ class MegaScript:
             time.sleep(interval)
             continue
 
+    def stop_replay_buffer(self):
+        interval = self.switcher_poll_interval
+        buffer_active = self.req.get_replay_buffer_status().output_active
+        if buffer_active:
+            self.req.stop_replay_buffer()
+            while buffer_active:
+                buffer_active = self.req.get_replay_buffer_status().output_active
+                time.sleep(interval)
+
     def profile_switcher(self, new_profile_name):
         try:
-            interval = self.switcher_poll_interval
             profile_data = self.req.get_profile_list()
             current_profile_name = profile_data.current_profile_name
             profile_list = profile_data.profiles
-            buffer_active = self.req.get_replay_buffer_status().output_active
 
             if new_profile_name != current_profile_name and new_profile_name in profile_list:
-                if buffer_active:
-                    self.req.stop_replay_buffer()
-                    # wait for the buffer to stop before switching profiles
-                    while buffer_active:
-                        buffer_active = self.req.get_replay_buffer_status().output_active
-                        time.sleep(interval)
+                # wait for the buffer to stop before switching profiles
+                self.stop_replay_buffer()
                 self.req.set_current_profile(new_profile_name)
                 self.log_info_norepeat(f"Updated profile from {current_profile_name} to {new_profile_name}.")
         except Exception as error:
@@ -567,6 +570,7 @@ class MegaScript:
             height_same = mon_height == obs_height
             
             if (not width_same) or (not height_same):
+                self.stop_replay_buffer()
                 self.req.set_video_settings(
                     base_width=mon_width, 
                     base_height=mon_height,
