@@ -317,7 +317,6 @@ class MegaScript:
                             correct_dir = dir_special
                             # if this is None that's fine because we check that next
                             # reason things are done in this order is because we prioritize nonspecial apps (i.e games) first
-
                     
                     # make our own dir if none is found
                     # use window name from first entry in fullscreen windows
@@ -543,6 +542,7 @@ class MegaScript:
     def profile_switcher(self, new_profile_name):
         try:
             profile_data = self.req.get_profile_list()
+            if profile_data is None: return
             current_profile_name = profile_data.current_profile_name
             profile_list = profile_data.profiles
 
@@ -561,8 +561,7 @@ class MegaScript:
 
         try:
             video_settings = self.req.get_video_settings()
-            # sometimes this can return None for some reason
-            if not video_settings: return
+            if video_settings is None: return
             obs_width = video_settings.base_width
             obs_height = video_settings.base_height
 
@@ -587,8 +586,7 @@ class MegaScript:
     def manage_buffer_state(self):
         try:
             current_scene_data = self.req.get_current_program_scene()
-            if current_scene_data is None:
-                return
+            if current_scene_data is None: return
             current_scene = current_scene_data.scene_name
             buffer_active = self.req.get_replay_buffer_status().output_active
 
