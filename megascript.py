@@ -10,7 +10,7 @@ from send2trash import send2trash
 import win32gui, win32process, time, threading, psutil, shutil, logging, re, os, json, subprocess
 
 class MegaScript:
-
+    
     def __init__(self):
         self.evt = None
         self.req = None
@@ -362,8 +362,7 @@ class MegaScript:
             # below if statement does NOT mean the window is the one focused
             # this means the window has the visible bit set. 
             # this check is here to filter out weird windows that we don't care about
-            if not win32gui.IsWindowVisible(hWnd):
-                return
+            if not win32gui.IsWindowVisible(hWnd): return
             
             # setup the data we care about for our window
             rect = win32gui.GetWindowRect(hWnd)
@@ -430,8 +429,6 @@ class MegaScript:
         return valid_windows_list
 
     def switcher(self):
-        # TODO: fix the abysmal scope pyramid/tabbing issue in this fn
-
         interval = self.switcher_poll_interval
 
         while self.running:
@@ -440,98 +437,99 @@ class MegaScript:
                 continue
 
             try:
-                current_scene_data = self.req.get_current_program_scene()
-                if current_scene_data is None:
-                    time.sleep(interval) 
-                    continue
-                current_scene = current_scene_data.scene_name
-
-                valid_windows = self.get_valid_windows()
-                # first obtain list of all focused windows
-                # this SHOULD be only one window, but you never know
-                focused_windows = [window for window in valid_windows.values() if window.get("focused")]
-                chosen_window = None
-
-                if not focused_windows: 
-                    if current_scene != self.SCENE_AFK_NAME:
-                        self.log_info_norepeat(f"Setting scene to {self.SCENE_AFK_NAME}.")
-                        self.req.set_current_program_scene(self.SCENE_AFK_NAME)
-                        self.afk_timer = int(time.time()) + self.buffer_timeout
-                else:
-                    # separate focused windows out further into lists for special and non special focused windows
-                    focused_special = [window for window in focused_windows if window.get("special_scene")]
-                    focused_notspecial = [window for window in focused_windows if not window.get("special_scene")]
-                    # check game capture stuff first because we prioritize games over special windows
-                    # we only care about the non special focused windows here
-                    if current_scene != self.SCENE_GAME_NAME and focused_notspecial:
-                        if len(focused_notspecial) == 1:
-                            chosen_window = focused_notspecial[0]
-                        else:
-                            chosen_window = choice(focused_notspecial)
-                            self.logger.warning(f"Detected multiple focused nonspecial windows! Selected {chosen_window} to switch to at random.")
-
-                        self.req.set_current_program_scene(self.SCENE_GAME_NAME)
-                        self.req.set_input_settings(
-                            name="Capture 0", 
-                            settings={
-                                "capture_mode": "window",
-                                "window": chosen_window["obs_window_str"]
-                            },
-                            overlay=True
-                        )
-
-                        self.log_info_norepeat(f"Set scene to {self.SCENE_GAME_NAME}, swapped {self.SCENE_GAME_NAME} output to {chosen_window["obs_window_str"]}.")
-                    elif focused_special:
-                        windows_with_scene = [w for w in focused_special if w.get("special_scene")]
-                        
-                        if windows_with_scene:
-                            if len(windows_with_scene) == 1:
-                                chosen_window = windows_with_scene[0]
-                            else:
-                                chosen_window = choice(windows_with_scene)
-                                self.logger.warning(f"Detected multiple focused special windows! Selected {chosen_window.get('obs_window_str')} to switch to at random.")
-                            
-                            target_scene = chosen_window.get("special_scene")
-                            
-                            # only switch if we're not already on the target scene
-                            if current_scene != target_scene:
-                                special_app_name = None
-                                
-                                for app in self.SPECIAL_WINDOW_SCENES.keys():
-                                    if app.lower() in chosen_window.get("obs_window_str").lower():
-                                        special_app_name = app
-                                        break
-                                
-                                input_name = self.SPECIAL_WINDOWS_INPUTS.get(special_app_name)
-                                self.req.set_current_program_scene(target_scene)
-                                
-                                # update the input source if we have a mapping for it
-                                if input_name:
-                                    self.req.set_input_settings(
-                                        name=input_name, 
-                                        settings={
-                                            "window": chosen_window["obs_window_str"]
-                                        },
-                                        overlay=True
-                                    )
-                                self.log_info_norepeat(f"Setting scene to {target_scene}, switching {target_scene} output to {chosen_window['obs_window_str']}.")
+                self.manage_scenes()
                 
-                # handle profile switching here
-                if chosen_window:
-                    self.profile_switcher(chosen_window["profile"])
-                
+                self.manage_buffer_state()
+
+                self.manage_resolution()
             except Exception as error:
                 self.handle_connection_lost(error)
-            
-            self.manage_buffer_state()
-
-            self.manage_resolution()
             
             time.sleep(interval)
             continue
 
+    def manage_scenes(self):
+        current_scene_data = self.req.get_current_program_scene()
+        if current_scene_data is None: return
+        current_scene = current_scene_data.scene_name
+
+        valid_windows = self.get_valid_windows()
+        # first obtain list of all focused windows
+        # this SHOULD be only one window, but you never know
+        focused_windows = [window for window in valid_windows.values() if window.get("focused")]
+        chosen_window = None
+
+        if not focused_windows: 
+            if current_scene != self.SCENE_AFK_NAME:
+                self.log_info_norepeat(f"Setting scene to {self.SCENE_AFK_NAME}.")
+                self.req.set_current_program_scene(self.SCENE_AFK_NAME)
+                self.afk_timer = int(time.time()) + self.buffer_timeout
+            return
+        
+        # separate focused windows out further into lists for special and non special focused windows
+        focused_special = [window for window in focused_windows if window.get("special_scene")]
+        focused_notspecial = [window for window in focused_windows if not window.get("special_scene")]
+        windows_with_scene = [w for w in focused_special if w.get("special_scene")]
+        # check game capture stuff first because we prioritize games over special windows
+        # we only care about the non special focused windows here
+        if current_scene != self.SCENE_GAME_NAME and focused_notspecial:
+            if len(focused_notspecial) == 1:
+                chosen_window = focused_notspecial[0]
+            else:
+                chosen_window = choice(focused_notspecial)
+                self.logger.warning(f"Detected multiple focused nonspecial windows! Selected {chosen_window} to switch to at random.")
+
+            self.req.set_current_program_scene(self.SCENE_GAME_NAME)
+            self.req.set_input_settings(
+                name="Capture 0", 
+                settings={
+                    "capture_mode": "window",
+                    "window": chosen_window["obs_window_str"]
+                },
+                overlay=True
+            )
+
+            self.log_info_norepeat(f"Set scene to {self.SCENE_GAME_NAME}, swapped {self.SCENE_GAME_NAME} output to {chosen_window["obs_window_str"]}.")
+        elif focused_special and windows_with_scene:
+            if len(windows_with_scene) == 1:
+                chosen_window = windows_with_scene[0]
+            else:
+                chosen_window = choice(windows_with_scene)
+                self.logger.warning(f"Detected multiple focused special windows! Selected {chosen_window.get('obs_window_str')} to switch to at random.")
+            
+            target_scene = chosen_window.get("special_scene")
+            
+            # only switch if we're not already on the target scene
+            if current_scene == target_scene: return
+
+            special_app_name = None
+            
+            for app in self.SPECIAL_WINDOW_SCENES.keys():
+                if app.lower() in chosen_window.get("obs_window_str").lower():
+                    special_app_name = app
+                    break
+            
+            input_name = self.SPECIAL_WINDOWS_INPUTS.get(special_app_name)
+            self.req.set_current_program_scene(target_scene)
+            
+            # update the input source if we have a mapping for it
+            if input_name:
+                self.req.set_input_settings(
+                    name=input_name, 
+                    settings={
+                        "window": chosen_window["obs_window_str"]
+                    },
+                    overlay=True
+                )
+            self.log_info_norepeat(f"Setting scene to {target_scene}, switching {target_scene} output to {chosen_window['obs_window_str']}.")
+        
+        # handle profile switching here
+        if chosen_window:
+            self.profile_switcher(chosen_window["profile"])
+
     def stop_replay_buffer(self):
         interval = self.switcher_poll_interval
+
         buffer_active = self.req.get_replay_buffer_status().output_active
         if buffer_active:
             self.req.stop_replay_buffer()
@@ -540,66 +538,56 @@ class MegaScript:
                 time.sleep(interval)
 
     def profile_switcher(self, new_profile_name):
-        try:
-            profile_data = self.req.get_profile_list()
-            if profile_data is None: return
-            current_profile_name = profile_data.current_profile_name
-            profile_list = profile_data.profiles
+        profile_data = self.req.get_profile_list()
+        if profile_data is None: return
+        current_profile_name = profile_data.current_profile_name
+        profile_list = profile_data.profiles
 
-            if new_profile_name != current_profile_name and new_profile_name in profile_list:
-                # wait for the buffer to stop before switching profiles
-                self.stop_replay_buffer()
-                self.req.set_current_profile(new_profile_name)
-                self.log_info_norepeat(f"Updated profile from {current_profile_name} to {new_profile_name}.")
-        except Exception as error:
-            self.handle_connection_lost(error)
+        if new_profile_name != current_profile_name and new_profile_name in profile_list:
+            # wait for the buffer to stop before switching profiles
+            self.stop_replay_buffer()
+            self.req.set_current_profile(new_profile_name)
+            self.log_info_norepeat(f"Updated profile from {current_profile_name} to {new_profile_name}.")
 
     def manage_resolution(self):
         # get width and height of current display
         mon_width = self.user32.GetSystemMetrics(0)
         mon_height = self.user32.GetSystemMetrics(1)
 
-        try:
-            video_settings = self.req.get_video_settings()
-            if video_settings is None: return
-            obs_width = video_settings.base_width
-            obs_height = video_settings.base_height
+        video_settings = self.req.get_video_settings()
+        if video_settings is None: return
+        obs_width = video_settings.base_width
+        obs_height = video_settings.base_height
 
-            width_same = mon_width == obs_width
-            height_same = mon_height == obs_height
-            
-            if (not width_same) or (not height_same):
-                self.stop_replay_buffer()
-                self.req.set_video_settings(
-                    base_width=mon_width, 
-                    base_height=mon_height,
-                    out_width = mon_width,
-                    out_height=mon_height,
-                    # leave fps alone
-                    numerator=video_settings.fps_numerator, denominator=video_settings.fps_denominator
-                    )
-                self.log_info_norepeat(f"Updated OBS output from ({obs_width} x {obs_height}) to ({mon_width} x {mon_height}).")
+        width_same = mon_width == obs_width
+        height_same = mon_height == obs_height
+        if width_same and height_same: return
 
-        except Exception as error:
-            self.handle_connection_lost(error)
+        self.stop_replay_buffer()
+        self.req.set_video_settings(
+            base_width=mon_width, 
+            base_height=mon_height,
+            out_width = mon_width,
+            out_height=mon_height,
+            # leave fps alone
+            numerator=video_settings.fps_numerator, denominator=video_settings.fps_denominator
+            )
+        self.log_info_norepeat(f"Updated OBS output from ({obs_width} x {obs_height}) to ({mon_width} x {mon_height}).")
 
     def manage_buffer_state(self):
-        try:
-            current_scene_data = self.req.get_current_program_scene()
-            if current_scene_data is None: return
-            current_scene = current_scene_data.scene_name
-            buffer_active = self.req.get_replay_buffer_status().output_active
+        current_scene_data = self.req.get_current_program_scene()
+        if current_scene_data is None: return
+        current_scene = current_scene_data.scene_name
+        buffer_active = self.req.get_replay_buffer_status().output_active
 
-            now = int(time.time())
-            if current_scene == self.SCENE_AFK_NAME and now >= self.afk_timer and buffer_active:
-                self.log_info_norepeat(f"Stopping replay buffer, current time '{now}' greater than afk timer '{self.afk_timer}' and replay buffer active.")
-                self.req.stop_replay_buffer()
-            
-            elif (current_scene == self.SCENE_GAME_NAME or current_scene == self.SCENE_DISCORD_NAME) and not(buffer_active):
-                self.log_info_norepeat("Starting replay buffer.")
-                self.req.start_replay_buffer()
-        except Exception as error:
-            self.handle_connection_lost(error)
+        now = int(time.time())
+        if current_scene == self.SCENE_AFK_NAME and now >= self.afk_timer and buffer_active:
+            self.log_info_norepeat(f"Stopping replay buffer, current time '{now}' greater than afk timer '{self.afk_timer}' and replay buffer active.")
+            self.req.stop_replay_buffer()
+        
+        elif (current_scene == self.SCENE_GAME_NAME or current_scene == self.SCENE_DISCORD_NAME) and not(buffer_active):
+            self.log_info_norepeat("Starting replay buffer.")
+            self.req.start_replay_buffer()
 
     def get_emote(self):
         previous_emote = None
