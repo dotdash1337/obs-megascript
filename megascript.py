@@ -200,7 +200,7 @@ class MegaScript:
             if not isinstance(error, (obserror.OBSSDKError, obserror.OBSSDKRequestError, obserror.OBSSDKTimeoutError)):
                 self.logger.error(f"OBS connection failed but error is not an OBS error! Reconnecting...", exc_info=error)
             else:
-                self.logger.warning("OBS connection failed, reconnecting...")
+                self.logger.warning("OBS connection failed, reconnecting...", exc_info=error)
 
             self.reset_commands_json()
             self.establish_connection()
@@ -558,11 +558,14 @@ class MegaScript:
 
         try:
             video_settings = self.req.get_video_settings()
+            # sometimes this can return None for some reason
+            if not video_settings: return
             obs_width = video_settings.base_width
             obs_height = video_settings.base_height
 
             width_same = mon_width == obs_width
             height_same = mon_height == obs_height
+            
             if (not width_same) or (not height_same):
                 self.req.set_video_settings(
                     base_width=mon_width, 
