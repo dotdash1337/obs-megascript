@@ -7,7 +7,7 @@ from pathlib import Path
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 from send2trash import send2trash
-import win32gui, win32process, time, threading, psutil, shutil, logging, re, os, json, subprocess
+import win32gui, win32process, time, threading, psutil, shutil, logging, re, os, json, subprocess, websocket
 
 class MegaScript:
 
@@ -239,7 +239,15 @@ class MegaScript:
                 time.sleep(self.connect_attempts_interval)
 
     def handle_error(self, error):
-        if isinstance(error, (obserror.OBSSDKError, obserror.OBSSDKRequestError, obserror.OBSSDKTimeoutError)):
+        if isinstance(error, (
+            obserror.OBSSDKTimeoutError, 
+            json.JSONDecodeError, 
+            ConnectionAbortedError,
+            ConnectionResetError,
+            ConnectionRefusedError,
+            BrokenPipeError,
+            websocket.WebSocketConnectionClosedException
+        )):
             self.handle_connection_lost(error)
         else:
             self.logger.error(error, exc_info=error)
