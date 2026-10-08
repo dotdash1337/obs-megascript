@@ -473,6 +473,9 @@ class MegaScript:
                         break
             
             # determine if this hWnd is fullscreen
+            # the reason we're subtracting the coordinate position from the resolution number 
+            # is to fix an issue with multi monitor stuff
+            # if that isn't present, the coordinates are 0, so no harm done
             rect_size_x = rect[2] - rect[0]
             rect_size_y = rect[3] - rect[1]
             fsr_size_x = full_screen_rect[2]
