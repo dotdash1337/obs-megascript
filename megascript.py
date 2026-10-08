@@ -281,7 +281,7 @@ class MegaScript:
                 self.commands_observer.join(timeout=5)
                 self.commands_observer = None
             
-            self.logger.warning("OBS connection failed, reconnecting...", exc_info=error)
+            self.logger.warning("OBS connection failed, reconnecting...")
 
             self.establish_connection()
             self.reset_commands_json()
