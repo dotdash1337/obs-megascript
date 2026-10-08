@@ -92,6 +92,7 @@ class MegaScript:
         self.change_tabbed_text_poll_interval = 2
 
         self.buffer_timeout = 300
+        self.stop_buffer_timeout = 60
         self.afk_timer = 0
 
         # solution for getting script running dir stolen from here:
@@ -145,6 +146,69 @@ class MegaScript:
         except Exception as error:
             self.logger.exception("Error while resetting commands.json!")
 
+    def init_commands_observer(self):
+        # create event handler
+        class CommandsEvent(FileSystemEventHandler):
+            def __init__(self):
+                super().__init__()
+            
+            @staticmethod # this needs to be here so that self references the superclass and not CommandsEvent
+            def on_any_event(event):
+
+                # this try except block prevents duplicate events from occurring
+                # stolen from here: https://stackoverflow.com/a/79415551
+                try:
+                    t = os.path.getmtime(event.src_path)
+                    if event.src_path in self.modified_times and t == self.modified_times[event.src_path]:
+                        # duplicate event
+                        return
+                    self.modified_times[event.src_path] = t
+                except FileNotFoundError:
+                    # file got deleted after event was triggered
+                    try:
+                        del self.modified_times[event.src_path]
+                    except KeyError:
+                        pass
+                # continue processing event
+
+                if event.is_directory:
+                    return None
+
+                elif event.event_type == 'modified':
+                    if "commands.json" in event.src_path:
+                        commands_data = None
+
+                        try:
+                            with open(self.commands_path, "r") as f:
+                                commands_data = json.load(f)
+                                if commands_data["toggleSwitcher"]:
+                                    playsound(self.SFX_COMMAND_RECEIVED)
+                                    self.switcher_active = not(self.switcher_active)
+                                    self.log_info_norepeat(f"Toggling switcher to {self.switcher_active}.")
+                                    commands_data["toggleSwitcher"] = False
+                                
+                                if commands_data["instantReplay"]:
+                                    playsound(self.SFX_COMMAND_RECEIVED)
+                                    self.log_info_norepeat("Attempting to initiate instant replay...")
+                                    self.instant_replay()
+                                    commands_data["instantReplay"] = False
+                                
+                            with open(self.commands_path, "w") as f:
+                                json.dump(commands_data, f)
+                        except Exception as error:
+                            self.logger.exception("Error while processing command event!")
+
+        # start observer thread
+        self.commands_event = CommandsEvent()
+        self.commands_observer = Observer()
+        self.commands_observer.schedule(
+            event_handler = self.commands_event, 
+            path = self.script_path,
+            recursive = False
+        )
+        self.commands_observer.start()
+        
+
     def log_info_norepeat(self, msg, error=None):
         if not msg == self.logger_last_msg:
             if error:
@@ -188,7 +252,10 @@ class MegaScript:
             # kill all other threads
             if self.commands_observer:
                 self.commands_observer.stop()
-                self.commands_observer.join()
+
+            if self.commands_observer and self.commands_observer.ident != threading.current_thread().ident:
+                self.commands_observer.join(timeout=5)
+                self.commands_observer = None
 
             ### AI WRITTEN EXPLANATION FOR THIS CODE
             # The issue arises because handle_connection_lost is called from within one of the threads (e.g., change_tabbed_text), 
@@ -221,8 +288,7 @@ class MegaScript:
             if self.switcher_thread is None:
                 self.switcher_thread = threading.Thread(target=self.switcher)
                 self.switcher_thread.start()
-            if self.commands_observer:
-                self.commands_observer.start()
+            self.init_commands_observer()
 
             self.log_info_norepeat(f"Reconnected to OBS!")
 
@@ -382,6 +448,7 @@ class MegaScript:
                 class_name = win32gui.GetClassName(hWnd)
             except Exception as error:
                 self.logger.warning("Could not setup data for window correctly!", exc_info=error)
+                return
             obs_window_str = f"{window_name}:{class_name}:{exe_name}"
             special_scene = None
             profile = self.DEFAULT_PROFILE
@@ -450,7 +517,7 @@ class MegaScript:
             try:
                 chosen_window = self.manage_scenes()
 
-                self.profile_switcher(chosen_window)
+                self.profile_switcher(chosen_window["obs_window_str"])
                 
                 self.manage_buffer_state()
 
@@ -548,10 +615,12 @@ class MegaScript:
         buffer_active = self.req.get_replay_buffer_status().output_active
         if buffer_active:
             self.req.stop_replay_buffer()
-            while buffer_active and time_waited <= 60:
+            while buffer_active and time_waited <= self.buffer_timeout:
                 buffer_active = self.req.get_replay_buffer_status().output_active
                 time.sleep(interval)
                 time_waited = time_waited + interval
+
+            return not buffer_active
 
     def profile_switcher(self, new_profile_name):
         profile_data = self.req.get_profile_list()
@@ -561,9 +630,12 @@ class MegaScript:
 
         if new_profile_name != current_profile_name and new_profile_name in profile_list:
             # wait for the buffer to stop before switching profiles
-            self.stop_replay_buffer()
-            self.req.set_current_profile(new_profile_name)
-            self.log_info_norepeat(f"Updated profile from {current_profile_name} to {new_profile_name}.")
+            stopped = self.stop_replay_buffer()
+            if stopped:
+                self.req.set_current_profile(new_profile_name)
+                self.log_info_norepeat(f"Updated profile from {current_profile_name} to {new_profile_name}.")
+            else:
+                self.logger.warning(f"Could not stop buffer after waiting for {self.buffer_timeout} seconds. Profile not switched!")
 
     def manage_resolution(self):
         # get width and height of current display
@@ -579,16 +651,19 @@ class MegaScript:
         height_same = mon_height == obs_height
         if width_same and height_same: return
 
-        self.stop_replay_buffer()
-        self.req.set_video_settings(
-            base_width=mon_width, 
-            base_height=mon_height,
-            out_width = mon_width,
-            out_height=mon_height,
-            # leave fps alone
-            numerator=video_settings.fps_numerator, denominator=video_settings.fps_denominator
-            )
-        self.log_info_norepeat(f"Updated OBS output from ({obs_width} x {obs_height}) to ({mon_width} x {mon_height}).")
+        stopped = self.stop_replay_buffer()
+        if stopped:
+            self.req.set_video_settings(
+                base_width=mon_width, 
+                base_height=mon_height,
+                out_width = mon_width,
+                out_height=mon_height,
+                # leave fps alone
+                numerator=video_settings.fps_numerator, denominator=video_settings.fps_denominator
+                )
+            self.log_info_norepeat(f"Updated OBS output from ({obs_width} x {obs_height}) to ({mon_width} x {mon_height}).")
+        else:
+            self.logger.warning(f"Could not stop buffer after waiting for {self.buffer_timeout} seconds. Resolution not switched!")
 
     def manage_buffer_state(self):
         current_scene_data = self.req.get_current_program_scene()
@@ -660,66 +735,7 @@ class MegaScript:
             self.switcher_thread = threading.Thread(target=self.switcher)
             self.switcher_thread.start()
 
-        # create event handler for commands
-        class CommandsEvent(FileSystemEventHandler):
-            def __init__(self):
-                super().__init__()
-            
-            @staticmethod # this needs to be here so that self references the superclass and not CommandsEvent
-            def on_any_event(event):
-
-                # this try except block prevents duplicate events from occurring
-                # stolen from here: https://stackoverflow.com/a/79415551
-                try:
-                    t = os.path.getmtime(event.src_path)
-                    if event.src_path in self.modified_times and t == self.modified_times[event.src_path]:
-                        # duplicate event
-                        return
-                    self.modified_times[event.src_path] = t
-                except FileNotFoundError:
-                    # file got deleted after event was triggered
-                    try:
-                        del self.modified_times[event.src_path]
-                    except KeyError:
-                        pass
-                # continue processing event
-
-                if event.is_directory:
-                    return None
-
-                elif event.event_type == 'modified':
-                    if "commands.json" in event.src_path:
-                        commands_data = None
-
-                        try:
-                            with open(self.commands_path, "r") as f:
-                                commands_data = json.load(f)
-                                if commands_data["toggleSwitcher"]:
-                                    playsound(self.SFX_COMMAND_RECEIVED)
-                                    self.switcher_active = not(self.switcher_active)
-                                    self.log_info_norepeat(f"Toggling switcher to {self.switcher_active}.")
-                                    commands_data["toggleSwitcher"] = False
-                                
-                                if commands_data["instantReplay"]:
-                                    playsound(self.SFX_COMMAND_RECEIVED)
-                                    self.log_info_norepeat("Attempting to initiate instant replay...")
-                                    self.instant_replay()
-                                    commands_data["instantReplay"] = False
-                                
-                            with open(self.commands_path, "w") as f:
-                                json.dump(commands_data, f)
-                        except Exception as error:
-                            self.logger.exception("Error while processing command event!")
-
-        # start observer thread for commands
-        self.commands_event = CommandsEvent()
-        self.commands_observer = Observer()
-        self.commands_observer.schedule(
-            event_handler = self.commands_event, 
-            path = self.script_path,
-            recursive = False
-        )
-        self.commands_observer.start()
+        self.init_commands_observer()
 
         # keep the main thread alive
         try:
