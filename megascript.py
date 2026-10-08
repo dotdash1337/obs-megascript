@@ -73,6 +73,7 @@ class MegaScript:
         self.DEFAULT_PROFILE = "120FPS"
         self.SCENE_AFK_NAME = "Alt Tabbed"
         self.SCENE_GAME_NAME = "Game Capture"
+        self.GAME_CAPTURE_NAME = "Capture 0"
         self.SCENE_DISCORD_NAME = "Discord Capture"
         self.SCENE_DESKTOP_NAME = "Desktop Capture"
 
@@ -173,6 +174,12 @@ class MegaScript:
                 self.log_info_norepeat(f"Could not establish connection to OBS!", error=error)
                 time.sleep(self.connect_attempts_interval)
 
+    def handle_error(self, error):
+        if isinstance(error, (obserror.OBSSDKError, obserror.OBSSDKRequestError, obserror.OBSSDKTimeoutError)):
+            self.handle_connection_lost(error)
+        else:
+            self.logger.error(error, exc_info=error)
+
     def handle_connection_lost(self, error):
         if self.connected: # only trigger this once so we don't have multiple instances of establish_connection() running
             self.connected = False
@@ -181,6 +188,7 @@ class MegaScript:
             # kill all other threads
             if self.commands_observer:
                 self.commands_observer.stop()
+                self.commands_observer.join()
 
             ### AI WRITTEN EXPLANATION FOR THIS CODE
             # The issue arises because handle_connection_lost is called from within one of the threads (e.g., change_tabbed_text), 
@@ -197,15 +205,13 @@ class MegaScript:
                 self.switcher_thread.join(timeout=5)
                 self.switcher_thread = None
             
-            if not isinstance(error, (obserror.OBSSDKError, obserror.OBSSDKRequestError, obserror.OBSSDKTimeoutError)):
-                self.logger.error(f"OBS connection failed but error is not an OBS error! Reconnecting...", exc_info=error)
-            else:
-                self.logger.warning("OBS connection failed, reconnecting...", exc_info=error)
+            self.logger.warning("OBS connection failed, reconnecting...", exc_info=error)
 
-            self.reset_commands_json()
             self.establish_connection()
+            self.reset_commands_json()
             self.profile_switcher(self.DEFAULT_PROFILE)
             self.manage_resolution()
+            self.instant_replay_requested = False
             
             # restart threads now that we're back online
             self.running = True
@@ -215,6 +221,8 @@ class MegaScript:
             if self.switcher_thread is None:
                 self.switcher_thread = threading.Thread(target=self.switcher)
                 self.switcher_thread.start()
+            if self.commands_observer:
+                self.commands_observer.start()
 
             self.log_info_norepeat(f"Reconnected to OBS!")
 
@@ -277,19 +285,19 @@ class MegaScript:
         valid_windows = self.get_valid_windows()
 
         if self.instant_replay_requested:
-            self.instant_replay_requested = False
-            mpv_args = [
-                "mpv",
-                "--pause",
-                filepath
-            ]
-            playsound(self.SFX_RECORD_END)
-            subprocess.run(mpv_args)
             try:
+                self.instant_replay_requested = False
+                mpv_args = [
+                    "mpv",
+                    "--pause",
+                    filepath
+                ]
+                playsound(self.SFX_RECORD_END)
+                subprocess.run(mpv_args)
                 send2trash(filepath)
-                self.log_info_norepeat(f"Sent {filepath} to trash after user exited instant replay successfully!")
+                self.log_info_norepeat(f"Sent '{filepath}' to trash after user exited instant replay successfully!")
             except Exception as error:
-                self.logger.exception(f"Error with sending {filepath} to trash!")
+                self.logger.exception(f"Error while trying to play back instant replay '{filepath}'!")
         else:
             try:
                 if valid_windows:
@@ -365,12 +373,15 @@ class MegaScript:
             if not win32gui.IsWindowVisible(hWnd): return
             
             # setup the data we care about for our window
-            rect = win32gui.GetWindowRect(hWnd)
-            window_name = win32gui.GetWindowText(hWnd)
-            tid, pid = win32process.GetWindowThreadProcessId(hWnd) # first var is thread id, second var is process id
-            proc = psutil.Process(pid)
-            exe_name = Path(proc.exe()).stem + ".exe"
-            class_name = win32gui.GetClassName(hWnd)
+            try:
+                rect = win32gui.GetWindowRect(hWnd)
+                window_name = win32gui.GetWindowText(hWnd)
+                tid, pid = win32process.GetWindowThreadProcessId(hWnd) # first var is thread id, second var is process id
+                proc = psutil.Process(pid)
+                exe_name = Path(proc.exe()).stem + ".exe"
+                class_name = win32gui.GetClassName(hWnd)
+            except Exception as error:
+                self.logger.warning("Could not setup data for window correctly!", exc_info=error)
             obs_window_str = f"{window_name}:{class_name}:{exe_name}"
             special_scene = None
             profile = self.DEFAULT_PROFILE
@@ -387,8 +398,8 @@ class MegaScript:
                         break
             
             # determine if this hWnd is fullscreen
-            rect_size_x = rect[2]
-            rect_size_y = rect[3]
+            rect_size_x = rect[2] - rect[0]
+            rect_size_y = rect[3] - rect[1]
             fsr_size_x = full_screen_rect[2]
             fsr_size_y = full_screen_rect[3]
             fullscreen = False
@@ -437,13 +448,15 @@ class MegaScript:
                 continue
 
             try:
-                self.manage_scenes()
+                chosen_window = self.manage_scenes()
+
+                self.profile_switcher(chosen_window)
                 
                 self.manage_buffer_state()
 
                 self.manage_resolution()
             except Exception as error:
-                self.handle_connection_lost(error)
+                self.handle_error(error)
             
             time.sleep(interval)
             continue
@@ -464,24 +477,27 @@ class MegaScript:
                 self.log_info_norepeat(f"Setting scene to {self.SCENE_AFK_NAME}.")
                 self.req.set_current_program_scene(self.SCENE_AFK_NAME)
                 self.afk_timer = int(time.time()) + self.buffer_timeout
-            return
+            return None
         
         # separate focused windows out further into lists for special and non special focused windows
         focused_special = [window for window in focused_windows if window.get("special_scene")]
         focused_notspecial = [window for window in focused_windows if not window.get("special_scene")]
         windows_with_scene = [w for w in focused_special if w.get("special_scene")]
+
+        game_input_settings = self.req.get_input_settings(self.GAME_CAPTURE_NAME)
+        game_input_window = game_input_settings.window
+        # this check fixes a potential bug if we directly alt tab from one game to another,
+        # because we'd be on the same scene but the input doesn't get updated correctly
+        is_gamescene_but_wrong_input_settings = ((focused_notspecial and game_input_window and current_scene == self.SCENE_GAME_NAME) and focused_notspecial[0]["obs_window_str"] != game_input_window)
+
         # check game capture stuff first because we prioritize games over special windows
         # we only care about the non special focused windows here
-        if current_scene != self.SCENE_GAME_NAME and focused_notspecial:
-            if len(focused_notspecial) == 1:
-                chosen_window = focused_notspecial[0]
-            else:
-                chosen_window = choice(focused_notspecial)
-                self.logger.warning(f"Detected multiple focused nonspecial windows! Selected {chosen_window} to switch to at random.")
+        if (current_scene != self.SCENE_GAME_NAME and focused_notspecial) or is_gamescene_but_wrong_input_settings:
+            chosen_window = focused_notspecial[0]
 
             self.req.set_current_program_scene(self.SCENE_GAME_NAME)
             self.req.set_input_settings(
-                name="Capture 0", 
+                name=self.GAME_CAPTURE_NAME, 
                 settings={
                     "capture_mode": "window",
                     "window": chosen_window["obs_window_str"]
@@ -500,7 +516,7 @@ class MegaScript:
             target_scene = chosen_window.get("special_scene")
             
             # only switch if we're not already on the target scene
-            if current_scene == target_scene: return
+            if current_scene == target_scene: return chosen_window
 
             special_app_name = None
             
@@ -522,20 +538,20 @@ class MegaScript:
                     overlay=True
                 )
             self.log_info_norepeat(f"Setting scene to {target_scene}, switching {target_scene} output to {chosen_window['obs_window_str']}.")
-        
-        # handle profile switching here
-        if chosen_window:
-            self.profile_switcher(chosen_window["profile"])
 
+        return chosen_window
+        
     def stop_replay_buffer(self):
         interval = self.switcher_poll_interval
+        time_waited = 0
 
         buffer_active = self.req.get_replay_buffer_status().output_active
         if buffer_active:
             self.req.stop_replay_buffer()
-            while buffer_active:
+            while buffer_active and time_waited <= 60:
                 buffer_active = self.req.get_replay_buffer_status().output_active
                 time.sleep(interval)
+                time_waited = time_waited + interval
 
     def profile_switcher(self, new_profile_name):
         profile_data = self.req.get_profile_list()
@@ -613,7 +629,7 @@ class MegaScript:
                         "text": f"Alt Tabbed {next(self.emote_gen)}"
                     }, True)
             except Exception as error:
-                self.handle_connection_lost(error)
+                self.handle_error(error)
 
             time.sleep(interval)
             continue
@@ -622,16 +638,16 @@ class MegaScript:
         try:
             buffer_active = self.req.get_replay_buffer_status().output_active
             if buffer_active and not self.instant_replay_requested:
-                self.instant_replay_requested = True
                 self.req.save_replay_buffer()
+                self.instant_replay_requested = True
             else:
                 playsound(self.SFX_RECORD_ERROR)
                 if not buffer_active:
                     self.logger.warning("Cannot show instant replay; replay buffer inactive!")
                 elif self.instant_replay_requested:
-                    self.logger.warning("Cannot show instant replay; one was already requested recently!")
+                    self.logger.warning("Cannot show instant replay; one was already requested recently!") 
         except Exception as error:
-            self.handle_connection_lost(error)
+            self.handle_error(error)
 
     def run(self):
         # start the text changer
@@ -675,22 +691,25 @@ class MegaScript:
                     if "commands.json" in event.src_path:
                         commands_data = None
 
-                        with open(self.commands_path, "r") as f:
-                            commands_data = json.load(f)
-                            if commands_data["toggleSwitcher"]:
-                                playsound(self.SFX_COMMAND_RECEIVED)
-                                self.switcher_active = not(self.switcher_active)
-                                self.log_info_norepeat(f"Toggling switcher to {self.switcher_active}.")
-                                commands_data["toggleSwitcher"] = False
-                            
-                            if commands_data["instantReplay"]:
-                                playsound(self.SFX_COMMAND_RECEIVED)
-                                self.log_info_norepeat("Attempting to initiate instant replay...")
-                                self.instant_replay()
-                                commands_data["instantReplay"] = False
-                            
-                        with open(self.commands_path, "w") as f:
-                            json.dump(commands_data, f)
+                        try:
+                            with open(self.commands_path, "r") as f:
+                                commands_data = json.load(f)
+                                if commands_data["toggleSwitcher"]:
+                                    playsound(self.SFX_COMMAND_RECEIVED)
+                                    self.switcher_active = not(self.switcher_active)
+                                    self.log_info_norepeat(f"Toggling switcher to {self.switcher_active}.")
+                                    commands_data["toggleSwitcher"] = False
+                                
+                                if commands_data["instantReplay"]:
+                                    playsound(self.SFX_COMMAND_RECEIVED)
+                                    self.log_info_norepeat("Attempting to initiate instant replay...")
+                                    self.instant_replay()
+                                    commands_data["instantReplay"] = False
+                                
+                            with open(self.commands_path, "w") as f:
+                                json.dump(commands_data, f)
+                        except Exception as error:
+                            self.logger.exception("Error while processing command event!")
 
         # start observer thread for commands
         self.commands_event = CommandsEvent()
