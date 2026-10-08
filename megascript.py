@@ -258,12 +258,6 @@ class MegaScript:
             self.running = False
 
             # kill all other threads
-            if self.commands_observer:
-                self.commands_observer.stop()
-
-            if self.commands_observer and self.commands_observer.ident != threading.current_thread().ident:
-                self.commands_observer.join(timeout=5)
-                self.commands_observer = None
 
             ### AI WRITTEN EXPLANATION FOR THIS CODE
             # The issue arises because handle_connection_lost is called from within one of the threads (e.g., change_tabbed_text), 
@@ -279,6 +273,13 @@ class MegaScript:
             if self.switcher_thread and self.switcher_thread.ident != threading.current_thread().ident:
                 self.switcher_thread.join(timeout=5)
                 self.switcher_thread = None
+
+            if self.commands_observer:
+                self.commands_observer.stop()
+
+            if self.commands_observer and self.commands_observer.ident != threading.current_thread().ident:
+                self.commands_observer.join(timeout=5)
+                self.commands_observer = None
             
             self.logger.warning("OBS connection failed, reconnecting...", exc_info=error)
 
@@ -528,7 +529,8 @@ class MegaScript:
             try:
                 chosen_window = self.manage_scenes()
 
-                self.profile_switcher(chosen_window["obs_window_str"])
+                if chosen_window:
+                    self.profile_switcher(chosen_window["obs_window_str"])
                 
                 self.manage_buffer_state()
 
