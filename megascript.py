@@ -565,7 +565,8 @@ class MegaScript:
         windows_with_scene = [w for w in focused_special if w.get("special_scene")]
 
         game_input_settings = self.req.get_input_settings(self.GAME_CAPTURE_NAME)
-        game_input_window = game_input_settings.window
+        if game_input_settings.window:
+            game_input_window = game_input_settings.window
         # this check fixes a potential bug if we directly alt tab from one game to another,
         # because we'd be on the same scene but the input doesn't get updated correctly
         is_gamescene_but_wrong_input_settings = ((focused_notspecial and game_input_window and current_scene == self.SCENE_GAME_NAME) and focused_notspecial[0]["obs_window_str"] != game_input_window)
