@@ -8,7 +8,7 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 from send2trash import send2trash
 from dupefilter import DuplicateFilter
-import win32gui, win32process, time, threading, psutil, shutil, logging, re, os, json, subprocess, websocket, sys
+import win32gui, win32process, time, threading, psutil, shutil, logging, re, os, json, subprocess, websocket
 
 class MegaScript:
 
