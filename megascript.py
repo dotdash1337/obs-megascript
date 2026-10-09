@@ -7,7 +7,8 @@ from pathlib import Path
 from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 from send2trash import send2trash
-import win32gui, win32process, time, threading, psutil, shutil, logging, re, os, json, subprocess, websocket
+from dupefilter import DuplicateFilter
+import win32gui, win32process, time, threading, psutil, shutil, logging, re, os, json, subprocess, websocket, sys
 
 class MegaScript:
 
@@ -104,17 +105,23 @@ class MegaScript:
         self.connected = False
         self.running = True
 
-        logging.basicConfig(
+        # configure logger
+        self.logger = logging.getLogger("obs-megascript")
+        self.log_handler = logging.FileHandler(
             filename=Path.joinpath(self.script_path, "megascript.log"),
-            filemode="a",
-            format='%(asctime)s %(levelname)s %(module)s - %(funcName)s: %(message)s',
-            datefmt='%Y-%m-%d %I:%M:%S %p',
-            level=logging.WARNING
+            mode="a"
         )
+        self.log_formatter = logging.Formatter(
+            fmt='%(asctime)s %(levelname)s %(module)s - %(funcName)s: %(message)s',
+            datefmt='%Y-%m-%d %I:%M:%S %p'
+        )
+        self.log_handler.addFilter(DuplicateFilter())
+        self.log_handler.setFormatter(self.log_formatter)
+        self.logger.addHandler(self.log_handler)
+        self.logger.setLevel(logging.WARNING)
+
         # disable base obsws_python logging
         logging.getLogger("obsws_python").setLevel(logging.CRITICAL)
-        self.logger = logging.getLogger("obs-megascript")
-        self.logger_last_msg = ""
 
         self.commands_path = Path.joinpath(self.script_path, "commands.json")
         self.commands_observer = None
@@ -127,12 +134,12 @@ class MegaScript:
         self.SFX_RECORD_ERROR = str(Path.joinpath(self.script_path, "assets", "error.mp3"))
         self.SFX_COMMAND_RECEIVED = str(Path.joinpath(self.script_path, "assets", "commandreceived.mp3"))
 
-        self.log_info_norepeat("Megascript initialized! Connecting to OBS...")
+        self.logger.info("Megascript initialized! Connecting to OBS...")
         self.reset_commands_json()
         self.establish_connection()
         self.profile_switcher(self.DEFAULT_PROFILE)
         self.manage_resolution()
-        self.log_info_norepeat("Connected to OBS!")
+        self.logger.info("Connected to OBS!")
 
     def reset_commands_json(self):
         try:
@@ -184,12 +191,12 @@ class MegaScript:
                                 if commands_data["toggleSwitcher"]:
                                     playsound(self.SFX_COMMAND_RECEIVED)
                                     self.switcher_active = not(self.switcher_active)
-                                    self.log_info_norepeat(f"Toggling switcher to {self.switcher_active}.")
+                                    self.logger.info(f"Toggling switcher to {self.switcher_active}.")
                                     commands_data["toggleSwitcher"] = False
                                 
                                 if commands_data["instantReplay"]:
                                     playsound(self.SFX_COMMAND_RECEIVED)
-                                    self.log_info_norepeat("Attempting to initiate instant replay...")
+                                    self.logger.info("Attempting to initiate instant replay...")
                                     self.instant_replay()
                                     commands_data["instantReplay"] = False
                                 
@@ -207,15 +214,6 @@ class MegaScript:
             recursive = False
         )
         self.commands_observer.start()
-        
-
-    def log_info_norepeat(self, msg, error=None):
-        if not msg == self.logger_last_msg:
-            if error:
-                self.logger.info(msg, exc_info=error)
-            else:
-                self.logger.info(msg)
-        self.logger_last_msg = msg
 
     def establish_connection(self):
         while not self.connected:
@@ -235,7 +233,7 @@ class MegaScript:
                 self.evt.callback.register(self.on_record_state_changed)
                 self.connected = True
             except Exception as error:
-                self.log_info_norepeat(f"Could not establish connection to OBS!", error=error)
+                self.logger.info(f"Could not establish connection to OBS!", error=error)
                 time.sleep(self.connect_attempts_interval)
 
     def handle_error(self, error):
@@ -299,7 +297,7 @@ class MegaScript:
                 self.switcher_thread.start()
             self.init_commands_observer()
 
-            self.log_info_norepeat(f"Reconnected to OBS!")
+            self.logger.info(f"Reconnected to OBS!")
 
     def on_record_state_changed(self, data):
         saved_recording_data = None
@@ -370,7 +368,7 @@ class MegaScript:
                 playsound(self.SFX_RECORD_END)
                 subprocess.run(mpv_args)
                 send2trash(filepath)
-                self.log_info_norepeat(f"Sent '{filepath}' to trash after user exited instant replay successfully!")
+                self.logger.info(f"Sent '{filepath}' to trash after user exited instant replay successfully!")
             except Exception as error:
                 self.logger.exception(f"Error while trying to play back instant replay '{filepath}'!")
         else:
@@ -421,7 +419,7 @@ class MegaScript:
                 else:
                     self.logger.warning(f"Could not move file '{filepath}'. File was NOT moved from original location.")
 
-            self.log_info_norepeat(f"Succesfully saved original file '{filepath}' at '{correct_dir}'.")
+            self.logger.info(f"Succesfully saved original file '{filepath}' at '{correct_dir}'.")
             playsound(self.SFX_RECORD_END)
     
     def get_valid_windows(self):
@@ -554,7 +552,7 @@ class MegaScript:
 
         if not focused_windows: 
             if current_scene != self.SCENE_AFK_NAME:
-                self.log_info_norepeat(f"Setting scene to {self.SCENE_AFK_NAME}.")
+                self.logger.info(f"Setting scene to {self.SCENE_AFK_NAME}.")
                 self.req.set_current_program_scene(self.SCENE_AFK_NAME)
                 self.afk_timer = int(time.time()) + self.buffer_timeout
             return None
@@ -564,9 +562,11 @@ class MegaScript:
         focused_notspecial = [window for window in focused_windows if not window.get("special_scene")]
         windows_with_scene = [w for w in focused_special if w.get("special_scene")]
 
-        game_input_settings = self.req.get_input_settings(self.GAME_CAPTURE_NAME)
-        if hasattr(game_input_settings, "window"):
-            game_input_window = game_input_settings.window
+        game_capture_data = self.req.get_input_settings(self.GAME_CAPTURE_NAME)
+        game_input_window = None
+        if game_capture_data: 
+            game_input_window = game_capture_data.input_settings["window"]
+        
         # this check fixes a potential bug if we directly alt tab from one game to another,
         # because we'd be on the same scene but the input doesn't get updated correctly
         is_gamescene_but_wrong_input_settings = ((focused_notspecial and game_input_window and current_scene == self.SCENE_GAME_NAME) and focused_notspecial[0]["obs_window_str"] != game_input_window)
@@ -586,7 +586,7 @@ class MegaScript:
                 overlay=True
             )
 
-            self.log_info_norepeat(f"Set scene to {self.SCENE_GAME_NAME}, swapped {self.SCENE_GAME_NAME} output to {chosen_window["obs_window_str"]}.")
+            self.logger.info(f"Set scene to {self.SCENE_GAME_NAME}, swapped {self.SCENE_GAME_NAME} output to {chosen_window["obs_window_str"]}.")
         elif focused_special and windows_with_scene:
             if len(windows_with_scene) == 1:
                 chosen_window = windows_with_scene[0]
@@ -618,7 +618,7 @@ class MegaScript:
                     },
                     overlay=True
                 )
-            self.log_info_norepeat(f"Setting scene to {target_scene}, switching {target_scene} output to {chosen_window['obs_window_str']}.")
+            self.logger.info(f"Setting scene to {target_scene}, switching {target_scene} output to {chosen_window['obs_window_str']}.")
 
         return chosen_window
         
@@ -629,12 +629,12 @@ class MegaScript:
         buffer_active = self.req.get_replay_buffer_status().output_active
         if buffer_active:
             self.req.stop_replay_buffer()
-            while buffer_active and time_waited <= self.buffer_timeout:
+            while buffer_active and time_waited <= self.stop_buffer_timeout:
                 buffer_active = self.req.get_replay_buffer_status().output_active
                 time.sleep(interval)
                 time_waited = time_waited + interval
 
-            return not buffer_active
+        return not buffer_active
 
     def profile_switcher(self, new_profile_name):
         profile_data = self.req.get_profile_list()
@@ -647,9 +647,9 @@ class MegaScript:
             stopped = self.stop_replay_buffer()
             if stopped:
                 self.req.set_current_profile(new_profile_name)
-                self.log_info_norepeat(f"Updated profile from {current_profile_name} to {new_profile_name}.")
+                self.logger.info(f"Updated profile from {current_profile_name} to {new_profile_name}.")
             else:
-                self.logger.warning(f"Could not stop buffer after waiting for {self.buffer_timeout} seconds. Profile not switched!")
+                self.logger.warning(f"Could not stop buffer after waiting for {self.self.stop_buffer_timeout} seconds. Profile not switched!")
 
     def manage_resolution(self):
         # get width and height of current display
@@ -675,9 +675,9 @@ class MegaScript:
                 # leave fps alone
                 numerator=video_settings.fps_numerator, denominator=video_settings.fps_denominator
                 )
-            self.log_info_norepeat(f"Updated OBS output from ({obs_width} x {obs_height}) to ({mon_width} x {mon_height}).")
+            self.logger.info(f"Updated OBS output from ({obs_width} x {obs_height}) to ({mon_width} x {mon_height}).")
         else:
-            self.logger.warning(f"Could not stop buffer after waiting for {self.buffer_timeout} seconds. Resolution not switched!")
+            self.logger.warning(f"Could not stop buffer after waiting for {self.self.stop_buffer_timeout} seconds. Resolution not switched!")
 
     def manage_buffer_state(self):
         current_scene_data = self.req.get_current_program_scene()
@@ -687,11 +687,11 @@ class MegaScript:
 
         now = int(time.time())
         if current_scene == self.SCENE_AFK_NAME and now >= self.afk_timer and buffer_active:
-            self.log_info_norepeat(f"Stopping replay buffer, current time '{now}' greater than afk timer '{self.afk_timer}' and replay buffer active.")
+            self.logger.info(f"Stopping replay buffer, current time '{now}' greater than afk timer '{self.afk_timer}' and replay buffer active.")
             self.req.stop_replay_buffer()
         
         elif (current_scene == self.SCENE_GAME_NAME or current_scene == self.SCENE_DISCORD_NAME) and not(buffer_active):
-            self.log_info_norepeat("Starting replay buffer.")
+            self.logger.info("Starting replay buffer.")
             self.req.start_replay_buffer()
 
     def get_emote(self):
