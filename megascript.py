@@ -528,7 +528,7 @@ class MegaScript:
                 chosen_window = self.manage_scenes()
 
                 if chosen_window:
-                    self.profile_switcher(chosen_window["obs_window_str"])
+                    self.profile_switcher(chosen_window["profile"])
                 
                 self.manage_buffer_state()
 
