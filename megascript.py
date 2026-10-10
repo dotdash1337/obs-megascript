@@ -244,8 +244,8 @@ class MegaScript:
             ConnectionResetError,
             ConnectionRefusedError,
             BrokenPipeError,
-            websocket.WebSocketConnectionClosedException
-        )):
+            websocket.WebSocketConnectionClosedException,
+        )) or isinstance(error, obserror.OBSSDKRequestError) and error.code == 207:
             self.handle_connection_lost(error)
         else:
             self.logger.error(error, exc_info=error)
