@@ -26,7 +26,7 @@ class DuplicateFilter(logging.Filter):
         last_msg_data["times_sent"] = last_msg_data["times_sent"] + 1
 
         if last_msg == log_msg:
-            new_log.msg = new_log.msg + f" (x{last_msg_data["times_sent"]})"
+            new_log.msg = new_log.msg + f" (repeated x{last_msg_data["times_sent"]})"
         else:
             last_msg_data["times_sent"] = 1
 
