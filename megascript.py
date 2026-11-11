@@ -104,6 +104,16 @@ class MegaScript:
         self.profile_switch_lock = threading.Lock()
         self.profile_ready.set()
         self.profile_change_timeout = 15
+        self.profile_settle_delay = 1
+
+        # track replay buffer state through obs event callback
+        self.buffer_state = "UNKNOWN"
+        self.buffer_state_condition = threading.Condition()
+        self.buffer_start_timeout = 10
+
+        # prevent replay buffer requests during video reconfiguration
+        self.video_reconfiguring = threading.Event()
+        self.video_settle_delay = 1
 
         # solution for getting script running dir stolen from here:
         # https://stackoverflow.com/a/9350788
@@ -248,14 +258,25 @@ class MegaScript:
 
                 # at this point if we haven't thrown an error we're probably chill
                 # set up the event callbacks and set connected to true
+                self.profile_ready.set()
                 self.evt.callback.register(self.on_replay_buffer_saved)
                 self.evt.callback.register(self.on_replay_buffer_state_changed)
                 self.evt.callback.register(self.on_current_profile_changing)
                 self.evt.callback.register(self.on_current_profile_changed)
                 self.evt.callback.register(self.on_record_state_changed)
+
+                # manually grab buffer state for the first time (no event to update it, we have to record it ourselves here)
+                with self.buffer_state_condition:
+                    status = self.req.get_replay_buffer_status()
+                    if status.output_active:
+                        self.buffer_state = "OBS_WEBSOCKET_OUTPUT_STARTED"
+                    else:
+                        self.buffer_state = "OBS_WEBSOCKET_OUTPUT_STOPPED"
+                    self.buffer_state_condition.notify_all()
+
                 self.connected = True
-            except Exception as error:
-                self.logger.info(f"Could not establish connection to OBS!", error=error)
+            except Exception:
+                self.logger.exception("Could not establish connection to OBS!")
                 time.sleep(self.connect_attempts_interval)
 
     # END INITIALIZATION AND HELPER FUNCTIONS
@@ -276,7 +297,11 @@ class MegaScript:
         )) or isinstance(error, obserror.OBSSDKRequestError) and error.code == 207:
             self.handle_connection_lost(error)
         else:
-            self.logger.error(error, exc_info=error)
+            self.logger.error(
+                "OBS controller error: %s",
+                error,
+                exc_info=(type(error), error, error.__traceback__)
+            )
 
     def handle_connection_lost(self, error):
         if self.connected: # only trigger this once so we don't have multiple instances of establish_connection() running
@@ -350,7 +375,11 @@ class MegaScript:
         self.handle_saved_file(saved_replay)
 
     def on_replay_buffer_state_changed(self, data):
-        pass
+        with self.buffer_state_condition:
+            self.buffer_state = data.output_state
+            self.buffer_state_condition.notify_all()
+
+        self.logger.info(f"Replay buffer state changed: {data.output_state}")
 
     def on_current_profile_changing(self, data):
         self.profile_ready.clear()
@@ -582,6 +611,8 @@ class MegaScript:
         while self.running:
             if not self.profile_ready.is_set():
                 time.sleep(interval)
+                continue
+
             try:
                 chosen_window = self.manage_scenes()
                 profile_ok = True
@@ -596,13 +627,19 @@ class MegaScript:
                     self.manage_resolution()
 
                     # then handle buffer state
-                    if self.profile_ready.is_set():
+                    if self.profile_ready.is_set() and not self.video_reconfiguring.is_set():
                         self.manage_buffer_state()
 
             except Exception as error:
                 self.handle_error(error)
 
             time.sleep(interval)
+
+    ### END SWITCHER DEFINITIONS
+
+
+
+    ### OBS STATE MANAGERS
 
     def manage_scenes(self):
         if not self.profile_ready.is_set(): return
@@ -688,9 +725,8 @@ class MegaScript:
             self.logger.info(f"Setting scene to {target_scene}, switching {target_scene} output to {chosen_window['obs_window_str']}.")
 
         return chosen_window
-
+    
     def profile_switcher(self, new_profile_name):
-
         # only allow one profile switch operation at a time (if multiple threads were to request a switch)
         if not self.profile_switch_lock.acquire(blocking=False):
             self.logger.info(f"Profile switch already in progress! Ignoring request for profile {new_profile_name}.")
@@ -740,6 +776,8 @@ class MegaScript:
                 self.logger.error("Timed out waiting for OBS profile change!")
                 return False
 
+            time.sleep(self.profile_settle_delay)
+
             self.logger.info(f"Updated profile from {current_profile_name} to {new_profile_name}.")
 
             return True
@@ -748,96 +786,201 @@ class MegaScript:
             # always release the lock regardless of any errors
             self.profile_switch_lock.release()
 
-    ### END SWITCHER DEFINITIONS
-
-
-
-    ### OBS STATE MANAGERS
-
     def manage_resolution(self):
-        if not self.profile_ready.is_set(): return
+        if not self.profile_ready.is_set() or self.video_reconfiguring.is_set():
+            return
 
-        # get width and height of current display
-        mon_width = self.user32.GetSystemMetrics(0)
-        mon_height = self.user32.GetSystemMetrics(1)
+        self.video_reconfiguring.set()
 
-        video_settings = self.req.get_video_settings()
-        if video_settings is None: return
-        obs_width = video_settings.base_width
-        obs_height = video_settings.base_height
+        try:
+            # get width and height of current display
+            mon_width = self.user32.GetSystemMetrics(0)
+            mon_height = self.user32.GetSystemMetrics(1)
 
-        width_same = mon_width == obs_width
-        height_same = mon_height == obs_height
-        if width_same and height_same: return
+            video_settings = self.req.get_video_settings()
+            if video_settings is None: return
 
-        stopped = self.stop_replay_buffer()
-        if stopped:
+            obs_base = (video_settings.base_width, video_settings.base_height)
+            obs_output = (video_settings.output_width, video_settings.output_height)
+            target_resolution = (mon_width, mon_height)
+
+            if obs_base == target_resolution and obs_output == target_resolution:
+                return
+
+            stopped = self.stop_replay_buffer()
+            if not stopped:
+                self.logger.warning("Could not stop replay buffer. Resolution not switched!")
+                return
+
             self.req.set_video_settings(
-                base_width=mon_width, 
+                base_width=mon_width,
                 base_height=mon_height,
-                out_width = mon_width,
+                out_width=mon_width,
                 out_height=mon_height,
                 # leave fps alone
-                numerator=video_settings.fps_numerator, denominator=video_settings.fps_denominator
-                )
-            self.logger.info(f"Updated OBS output from ({obs_width} x {obs_height}) to ({mon_width} x {mon_height}).")
-        else:
-            self.logger.warning(f"Could not stop buffer after waiting for {self.self.stop_buffer_timeout} seconds. Resolution not switched!")
+                numerator=video_settings.fps_numerator,
+                denominator=video_settings.fps_denominator
+            )
+
+            self.logger.info(f"Updated OBS output from ({obs_base[0]} x {obs_base[1]}) to ({mon_width} x {mon_height}).")
+
+            # allow obs some time to finish setting up video settings before starting output
+            time.sleep(self.video_settle_delay)
+
+        finally:
+            self.video_reconfiguring.clear()
+
+    ### END OBS STATE MANAGERS
+
+
+
+    ### REPLAY BUFFER SPECIFIC MANAGERS
+
+    def wait_for_buffer_state(self, expected_states, timeout):
+        with self.buffer_state_condition:
+            return self.buffer_state_condition.wait_for(lambda: self.buffer_state in expected_states, timeout=timeout)
+
+    def mark_buffer_state_unknown(self, expected_states):
+        with self.buffer_state_condition:
+            if self.buffer_state not in expected_states:
+                self.buffer_state = "UNKNOWN"
 
     def stop_replay_buffer(self):
         if not self.profile_ready.is_set():
             return False
 
-        interval = self.switcher_poll_interval
-        time_waited = 0
+        with self.buffer_state_condition:
+            buffer_state = self.buffer_state
 
-        buffer_active = self.req.get_replay_buffer_status().output_active
-        if buffer_active:
+        if buffer_state == "UNKNOWN":
+            self.logger.warning("Replay buffer state is unknown! Buffer stop request dropped.")
+            return False
+
+        if buffer_state == "OBS_WEBSOCKET_OUTPUT_STOPPED":
+            return True
+
+        # wait to stop the buffer if it's already starting
+        if buffer_state == "OBS_WEBSOCKET_OUTPUT_STARTING":
+            if not self.wait_for_buffer_state({"OBS_WEBSOCKET_OUTPUT_STARTED", "OBS_WEBSOCKET_OUTPUT_STOPPED"}, self.buffer_start_timeout):
+                self.mark_buffer_state_unknown({
+                    "OBS_WEBSOCKET_OUTPUT_STARTED",
+                    "OBS_WEBSOCKET_OUTPUT_STOPPED"
+                })
+                self.logger.warning("Timed out waiting for replay buffer to finish starting!")
+                return False
+
+            with self.buffer_state_condition:
+                buffer_state = self.buffer_state
+
+        if buffer_state == "OBS_WEBSOCKET_OUTPUT_STOPPED":
+            return True
+
+        if buffer_state == "OBS_WEBSOCKET_OUTPUT_STOPPING":
+            stopped = self.wait_for_buffer_state(
+                {"OBS_WEBSOCKET_OUTPUT_STOPPED"},
+                self.stop_buffer_timeout
+            )
+            if not stopped:
+                self.mark_buffer_state_unknown({"OBS_WEBSOCKET_OUTPUT_STOPPED"})
+            return stopped
+
+        if buffer_state != "OBS_WEBSOCKET_OUTPUT_STARTED":
+            self.logger.warning(f"Unexpected replay buffer state: {buffer_state}")
+            return False
+
+        self.logger.info("Stopping replay buffer.")
+        try:
             self.req.stop_replay_buffer()
-            while buffer_active and time_waited <= self.stop_buffer_timeout:
-                buffer_active = self.req.get_replay_buffer_status().output_active
-                time.sleep(interval)
-                time_waited = time_waited + interval
+        except Exception:
+            self.mark_buffer_state_unknown({"OBS_WEBSOCKET_OUTPUT_STOPPED"})
+            raise
 
-        return not buffer_active
+        stopped = self.wait_for_buffer_state({"OBS_WEBSOCKET_OUTPUT_STOPPED"}, self.stop_buffer_timeout)
+
+        if not stopped:
+            self.mark_buffer_state_unknown({"OBS_WEBSOCKET_OUTPUT_STOPPED"})
+            self.logger.warning("Timed out waiting for replay buffer to stop.")
+
+        return stopped
+
+    def start_replay_buffer(self):
+        if not self.profile_ready.is_set() or self.video_reconfiguring.is_set():
+            return False
+
+        with self.buffer_state_condition:
+            buffer_state = self.buffer_state
+
+        if buffer_state == "OBS_WEBSOCKET_OUTPUT_STARTED":
+            return True
+
+        if buffer_state != "OBS_WEBSOCKET_OUTPUT_STOPPED":
+            return False
+
+        self.logger.info("Starting replay buffer.")
+        try:
+            self.req.start_replay_buffer()
+        except Exception:
+            self.mark_buffer_state_unknown({"OBS_WEBSOCKET_OUTPUT_STARTED"})
+            raise
+
+        started = self.wait_for_buffer_state(
+            {"OBS_WEBSOCKET_OUTPUT_STARTED"},
+            self.buffer_start_timeout
+        )
+
+        if not started:
+            self.mark_buffer_state_unknown({"OBS_WEBSOCKET_OUTPUT_STARTED"})
+            self.logger.warning("Timed out waiting for replay buffer to start.")
+
+        return started
 
     def manage_buffer_state(self):
-        if not self.profile_ready.is_set(): return
+        if not self.profile_ready.is_set() or self.video_reconfiguring.is_set():
+            return
 
         current_scene_data = self.req.get_current_program_scene()
         if current_scene_data is None: return
         current_scene = current_scene_data.scene_name
-        buffer_active = self.req.get_replay_buffer_status().output_active
+
+        with self.buffer_state_condition:
+            buffer_state = self.buffer_state
 
         now = int(time.time())
-        if current_scene == self.SCENE_AFK_NAME and now >= self.afk_timer and buffer_active:
-            self.logger.info(f"Stopping replay buffer, current time '{now}' greater than afk timer '{self.afk_timer}' and replay buffer active.")
-            self.req.stop_replay_buffer()
-        
-        elif (current_scene == self.SCENE_GAME_NAME or current_scene == self.SCENE_DISCORD_NAME) and not(buffer_active):
-            self.logger.info("Starting replay buffer.")
-            self.req.start_replay_buffer()
+
+        if (current_scene == self.SCENE_AFK_NAME and now >= self.afk_timer and buffer_state == "OBS_WEBSOCKET_OUTPUT_STARTED"):
+            self.logger.info(f"Stopping replay buffer, current time '{now}' greater than afk timer '{self.afk_timer}'.")
+            self.stop_replay_buffer()
+
+        elif (current_scene in (self.SCENE_GAME_NAME, self.SCENE_DISCORD_NAME) and buffer_state == "OBS_WEBSOCKET_OUTPUT_STOPPED"):
+            self.start_replay_buffer()
 
     def instant_replay(self):
         try:
-            if not self.profile_ready.is_set():
-                self.logger.warning("Rejecting instant replay request due to active profile switch!\n")
+            if not self.profile_ready.is_set() or self.video_reconfiguring.is_set():
+                self.logger.warning("Rejecting instant replay request during OBS reconfiguration!")
                 return
 
-            buffer_active = self.req.get_replay_buffer_status().output_active
+            with self.buffer_state_condition:
+                buffer_active = self.buffer_state == "OBS_WEBSOCKET_OUTPUT_STARTED"
+
             if buffer_active and not self.instant_replay_requested:
-                self.req.save_replay_buffer()
+                # set this before sending the request to avoid a callback race
                 self.instant_replay_requested = True
+                try:
+                    self.req.save_replay_buffer()
+                except Exception:
+                    self.instant_replay_requested = False
+                    raise
             else:
                 playsound(self.SFX_RECORD_ERROR)
                 if not buffer_active:
                     self.logger.warning("Cannot show instant replay; replay buffer inactive!")
                 elif self.instant_replay_requested:
-                    self.logger.warning("Cannot show instant replay; one was already requested recently!") 
+                    self.logger.warning("Cannot show instant replay; one was already requested recently!")
         except Exception as error:
             self.handle_error(error)
 
-    ### END OBS STATE MANAGERS
+    ### END REPLAY BUFFER SPECIFIC MANAGERS
 
 
 
@@ -856,7 +999,7 @@ class MegaScript:
 
         while self.running:
             try:
-                if not self.profile_ready.is_set():
+                if not self.profile_ready.is_set() or self.video_reconfiguring.is_set():
                     time.sleep(interval)
                     continue
 
