@@ -8,13 +8,16 @@ from watchdog.events import FileSystemEventHandler
 from watchdog.observers import Observer
 from send2trash import send2trash
 from dupefilter import DuplicateFilter
+from serializedreqclient import SerializedReqClient
 import win32gui, win32process, time, threading, psutil, shutil, logging, re, os, json, subprocess, websocket
 
 class MegaScript:
 
+    ### INITIALIZATION AND HELPER FUNCTIONS
     def __init__(self):
         self.evt = None
         self.req = None
+        self.req_lock = threading.RLock()
 
         self.text_update_delay = 2
         self.emote_gen = self.get_emote()
@@ -68,10 +71,10 @@ class MegaScript:
             "destiny": None
         }
         self.WINDOW_PROFILES = {
-            "300FPS": ["valorant", "cs2", "siege"],
+            "300FPS": ["valorant", "cs2", "siege", "deadlock"],
             "current": ["discord"]
         }
-        self.DEFAULT_PROFILE = "120FPS"
+        self.DEFAULT_PROFILE = "60FPS"
         self.SCENE_AFK_NAME = "Alt Tabbed"
         self.SCENE_GAME_NAME = "Game Capture"
         self.GAME_CAPTURE_NAME = "Capture 0"
@@ -96,6 +99,12 @@ class MegaScript:
         self.stop_buffer_timeout = 60
         self.afk_timer = 0
 
+        # setup tracking for profile readiness in OBS (has the profile actually changed?)
+        self.profile_ready = threading.Event()
+        self.profile_switch_lock = threading.Lock()
+        self.profile_ready.set()
+        self.profile_change_timeout = 15
+
         # solution for getting script running dir stolen from here:
         # https://stackoverflow.com/a/9350788
         self.script_path = Path(os.path.dirname(os.path.realpath(__file__)))
@@ -118,7 +127,7 @@ class MegaScript:
         self.log_handler.addFilter(DuplicateFilter())
         self.log_handler.setFormatter(self.log_formatter)
         self.logger.addHandler(self.log_handler)
-        self.logger.setLevel(logging.WARNING)
+        self.logger.setLevel(logging.INFO)
 
         # disable base obsws_python logging
         logging.getLogger("obsws_python").setLevel(logging.CRITICAL)
@@ -218,7 +227,18 @@ class MegaScript:
     def establish_connection(self):
         while not self.connected:
             try:
-                self.req = obs.ReqClient()
+                # this fixes a potential issue with sharing the same request client instance across threads
+                # SerializedReqClient employs a lock to ensure each request doesn't interfere with one another
+                # i could provide a separate instance of obs.ReqClient per thread, but that would be more annoying to implement 
+
+                # ai written explanation for this:
+                # The obsws-python request client uses a shared WebSocket connection and performs its own send/receive loop. 
+                # Its implementation does not provide a lock around that complete operation. 
+                # Concurrent requests can therefore consume each other's responses.
+                self.req = SerializedReqClient(
+                    obs.ReqClient(),
+                    self.req_lock
+                )
                 self.evt = obs.EventClient()
 
                 # run some test funcs to make sure we actually have a connection to obs
@@ -229,12 +249,20 @@ class MegaScript:
                 # at this point if we haven't thrown an error we're probably chill
                 # set up the event callbacks and set connected to true
                 self.evt.callback.register(self.on_replay_buffer_saved)
-                #self.evt.callback.register(self.on_replay_buffer_state_changed)
+                self.evt.callback.register(self.on_replay_buffer_state_changed)
+                self.evt.callback.register(self.on_current_profile_changing)
+                self.evt.callback.register(self.on_current_profile_changed)
                 self.evt.callback.register(self.on_record_state_changed)
                 self.connected = True
             except Exception as error:
                 self.logger.info(f"Could not establish connection to OBS!", error=error)
                 time.sleep(self.connect_attempts_interval)
+
+    # END INITIALIZATION AND HELPER FUNCTIONS
+
+
+
+    ### ERROR HANDLING
 
     def handle_error(self, error):
         if isinstance(error, (
@@ -299,6 +327,13 @@ class MegaScript:
 
             self.logger.info(f"Reconnected to OBS!")
 
+
+    ### END ERROR HANDLING
+
+
+
+    ### EVENT CALLBACK DEFINITIONS
+
     def on_record_state_changed(self, data):
         saved_recording_data = None
         output_state = data.output_state
@@ -313,6 +348,25 @@ class MegaScript:
         playsound(self.SFX_RECORD_START)
         saved_replay = Path(data.saved_replay_path)
         self.handle_saved_file(saved_replay)
+
+    def on_replay_buffer_state_changed(self, data):
+        pass
+
+    def on_current_profile_changing(self, data):
+        self.profile_ready.clear()
+
+        self.logger.info(f"OBS profile change started: {data.profile_name}")
+
+    def on_current_profile_changed(self, data):
+        self.logger.info(f"OBS profile change completed: {data.profile_name}")
+
+        self.profile_ready.set()
+
+    ### END EVENT CALLBACK DEFINITIONS
+
+
+
+    ### FILE SAVING
 
     def check_names_against_dir(self, names, directory):
         # this func stolen from here: https://stackoverflow.com/a/5320179
@@ -421,7 +475,13 @@ class MegaScript:
 
             self.logger.info(f"Succesfully saved original file '{filepath}' at '{correct_dir}'.")
             playsound(self.SFX_RECORD_END)
-    
+
+    ### END FILE SAVING
+
+
+
+    ### SWITCHER DEFINITIONS
+
     def get_valid_windows(self):
         # TODO: valorant currently sets its window rect to -32000 -32000 -31000 -31000 when it is alt tabbed.
         # this breaks this code because i assume windows will be at their normal pos and width/height even if they are not focused.
@@ -520,26 +580,33 @@ class MegaScript:
         interval = self.switcher_poll_interval
 
         while self.running:
-            if not self.switcher_active:
+            if not self.profile_ready.is_set():
                 time.sleep(interval)
-                continue
-
             try:
                 chosen_window = self.manage_scenes()
+                profile_ok = True
 
                 if chosen_window:
-                    self.profile_switcher(chosen_window["profile"])
-                
-                self.manage_buffer_state()
+                    profile_ok = self.profile_switcher(chosen_window["profile"])
 
-                self.manage_resolution()
+                # only continue if profile switching worked
+                if profile_ok and self.profile_ready.is_set():
+
+                    # handle resolution first
+                    self.manage_resolution()
+
+                    # then handle buffer state
+                    if self.profile_ready.is_set():
+                        self.manage_buffer_state()
+
             except Exception as error:
                 self.handle_error(error)
-            
+
             time.sleep(interval)
-            continue
 
     def manage_scenes(self):
+        if not self.profile_ready.is_set(): return
+
         current_scene_data = self.req.get_current_program_scene()
         if current_scene_data is None: return
         current_scene = current_scene_data.scene_name
@@ -621,37 +688,75 @@ class MegaScript:
             self.logger.info(f"Setting scene to {target_scene}, switching {target_scene} output to {chosen_window['obs_window_str']}.")
 
         return chosen_window
-        
-    def stop_replay_buffer(self):
-        interval = self.switcher_poll_interval
-        time_waited = 0
-
-        buffer_active = self.req.get_replay_buffer_status().output_active
-        if buffer_active:
-            self.req.stop_replay_buffer()
-            while buffer_active and time_waited <= self.stop_buffer_timeout:
-                buffer_active = self.req.get_replay_buffer_status().output_active
-                time.sleep(interval)
-                time_waited = time_waited + interval
-
-        return not buffer_active
 
     def profile_switcher(self, new_profile_name):
-        profile_data = self.req.get_profile_list()
-        if profile_data is None: return
-        current_profile_name = profile_data.current_profile_name
-        profile_list = profile_data.profiles
 
-        if new_profile_name != current_profile_name and new_profile_name in profile_list:
-            # wait for the buffer to stop before switching profiles
+        # only allow one profile switch operation at a time (if multiple threads were to request a switch)
+        if not self.profile_switch_lock.acquire(blocking=False):
+            self.logger.info(f"Profile switch already in progress! Ignoring request for profile {new_profile_name}.")
+            return False
+
+        try:
+            # check if obs is already switching profiles
+            if not self.profile_ready.is_set():
+                self.logger.warning(f"OBS is not ready to swap profiles! Aborting request for profile switch to {new_profile_name}.")
+                return False
+
+            profile_data = self.req.get_profile_list()
+
+            if profile_data is None:
+                return False
+
+            current_profile_name = profile_data.current_profile_name
+            profile_list = profile_data.profiles
+
+            if new_profile_name == current_profile_name:
+                return True
+
+            if new_profile_name not in profile_list:
+                return False
+
+            # wait for the buffer to stop before switching
             stopped = self.stop_replay_buffer()
-            if stopped:
+
+            if not stopped:
+                self.logger.warning(f"Could not stop replay buffer! Profile change to {new_profile_name} aborted.")
+                return False
+
+            self.logger.info(f"Switching profile from {current_profile_name} to {new_profile_name}.")
+
+            # mark OBS as unavailable BEFORE the request is sent
+            self.profile_ready.clear()
+
+            try:
                 self.req.set_current_profile(new_profile_name)
-                self.logger.info(f"Updated profile from {current_profile_name} to {new_profile_name}.")
-            else:
-                self.logger.warning(f"Could not stop buffer after waiting for {self.self.stop_buffer_timeout} seconds. Profile not switched!")
+
+            except Exception:
+                self.logger.exception("Failed to request OBS profile change!")
+                return False
+
+            # wait for CurrentProfileChanged to set profile_ready again
+            if not self.profile_ready.wait(timeout=self.profile_change_timeout):
+                self.logger.error("Timed out waiting for OBS profile change!")
+                return False
+
+            self.logger.info(f"Updated profile from {current_profile_name} to {new_profile_name}.")
+
+            return True
+
+        finally:
+            # always release the lock regardless of any errors
+            self.profile_switch_lock.release()
+
+    ### END SWITCHER DEFINITIONS
+
+
+
+    ### OBS STATE MANAGERS
 
     def manage_resolution(self):
+        if not self.profile_ready.is_set(): return
+
         # get width and height of current display
         mon_width = self.user32.GetSystemMetrics(0)
         mon_height = self.user32.GetSystemMetrics(1)
@@ -679,7 +784,26 @@ class MegaScript:
         else:
             self.logger.warning(f"Could not stop buffer after waiting for {self.self.stop_buffer_timeout} seconds. Resolution not switched!")
 
+    def stop_replay_buffer(self):
+        if not self.profile_ready.is_set():
+            return False
+
+        interval = self.switcher_poll_interval
+        time_waited = 0
+
+        buffer_active = self.req.get_replay_buffer_status().output_active
+        if buffer_active:
+            self.req.stop_replay_buffer()
+            while buffer_active and time_waited <= self.stop_buffer_timeout:
+                buffer_active = self.req.get_replay_buffer_status().output_active
+                time.sleep(interval)
+                time_waited = time_waited + interval
+
+        return not buffer_active
+
     def manage_buffer_state(self):
+        if not self.profile_ready.is_set(): return
+
         current_scene_data = self.req.get_current_program_scene()
         if current_scene_data is None: return
         current_scene = current_scene_data.scene_name
@@ -694,6 +818,31 @@ class MegaScript:
             self.logger.info("Starting replay buffer.")
             self.req.start_replay_buffer()
 
+    def instant_replay(self):
+        try:
+            if not self.profile_ready.is_set():
+                self.logger.warning("Rejecting instant replay request due to active profile switch!\n")
+                return
+
+            buffer_active = self.req.get_replay_buffer_status().output_active
+            if buffer_active and not self.instant_replay_requested:
+                self.req.save_replay_buffer()
+                self.instant_replay_requested = True
+            else:
+                playsound(self.SFX_RECORD_ERROR)
+                if not buffer_active:
+                    self.logger.warning("Cannot show instant replay; replay buffer inactive!")
+                elif self.instant_replay_requested:
+                    self.logger.warning("Cannot show instant replay; one was already requested recently!") 
+        except Exception as error:
+            self.handle_error(error)
+
+    ### END OBS STATE MANAGERS
+
+
+
+    ### ALT TABBED TEXT CHANGER
+
     def get_emote(self):
         previous_emote = None
         while True:
@@ -707,6 +856,10 @@ class MegaScript:
 
         while self.running:
             try:
+                if not self.profile_ready.is_set():
+                    time.sleep(interval)
+                    continue
+
                 current_scene_data = self.req.get_current_program_scene()
                 if current_scene_data is None:
                     time.sleep(interval) 
@@ -723,21 +876,8 @@ class MegaScript:
             time.sleep(interval)
             continue
 
-    def instant_replay(self):
-        try:
-            buffer_active = self.req.get_replay_buffer_status().output_active
-            if buffer_active and not self.instant_replay_requested:
-                self.req.save_replay_buffer()
-                self.instant_replay_requested = True
-            else:
-                playsound(self.SFX_RECORD_ERROR)
-                if not buffer_active:
-                    self.logger.warning("Cannot show instant replay; replay buffer inactive!")
-                elif self.instant_replay_requested:
-                    self.logger.warning("Cannot show instant replay; one was already requested recently!") 
-        except Exception as error:
-            self.handle_error(error)
-
+    ### END ALT TABBED TEXT CHANGER
+        
     def run(self):
         # start the text changer
         if self.change_tabbed_text_thread is None:
@@ -766,6 +906,9 @@ class MegaScript:
                 self.switcher_thread.join(timeout=5)
             self.logger.info("Shutdown complete.")
 
+
+
+# START SCRIPT
 if __name__ == "__main__":
     ms = MegaScript()
     ms.run()
