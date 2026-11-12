@@ -160,18 +160,6 @@ class MegaScript:
         self.manage_resolution()
         self.logger.info("Connected to OBS!")
 
-    def reset_commands_json(self):
-        try:
-            commands_data = None
-            with open(self.commands_path, "r") as f:
-                commands_data = json.load(f)
-            commands_data["toggleSwitcher"] = False
-            commands_data["instantReplay"] = False
-            with open(self.commands_path, "w") as f:
-                json.dump(commands_data, f)
-        except Exception as error:
-            self.logger.exception("Error while resetting commands.json!")
-
     def init_commands_observer(self):
         # create event handler
         class CommandsEvent(FileSystemEventHandler):
@@ -278,6 +266,23 @@ class MegaScript:
             except Exception:
                 self.logger.exception("Could not establish connection to OBS!")
                 time.sleep(self.connect_attempts_interval)
+
+    def reset_commands_json(self):
+        try:
+            commands_data = None
+            with open(self.commands_path, "r") as f:
+                commands_data = json.load(f)
+            commands_data["toggleSwitcher"] = False
+            commands_data["instantReplay"] = False
+            with open(self.commands_path, "w") as f:
+                json.dump(commands_data, f)
+        except Exception as error:
+            self.logger.exception("Error while resetting commands.json!")
+
+    def get_buffer_state(self):
+        # use our condition locking mechanism whenever we access the buffer state
+        with self.buffer_state_condition:
+            return self.buffer_state
 
     # END INITIALIZATION AND HELPER FUNCTIONS
 
@@ -622,11 +627,8 @@ class MegaScript:
 
                 # only continue if profile switching worked
                 if profile_ok and self.profile_ready.is_set():
-
-                    # handle resolution first
                     self.manage_resolution()
 
-                    # then handle buffer state
                     if self.profile_ready.is_set() and not self.video_reconfiguring.is_set():
                         self.manage_buffer_state()
 
@@ -738,8 +740,8 @@ class MegaScript:
                 self.logger.warning(f"OBS is not ready to swap profiles! Aborting request for profile switch to {new_profile_name}.")
                 return False
 
+            # ensure we can read our profile data first
             profile_data = self.req.get_profile_list()
-
             if profile_data is None:
                 return False
 
@@ -828,6 +830,7 @@ class MegaScript:
             time.sleep(self.video_settle_delay)
 
         finally:
+            # always release the lock regardless of any errors
             self.video_reconfiguring.clear()
 
     ### END OBS STATE MANAGERS
@@ -837,6 +840,8 @@ class MegaScript:
     ### REPLAY BUFFER SPECIFIC MANAGERS
 
     def wait_for_buffer_state(self, expected_states, timeout):
+        # this is the entire reason this is a Condition instead of a lock:
+        # we can wait for the buffer to be in the state we want, which is only possible with a condition
         with self.buffer_state_condition:
             return self.buffer_state_condition.wait_for(lambda: self.buffer_state in expected_states, timeout=timeout)
 
@@ -849,8 +854,7 @@ class MegaScript:
         if not self.profile_ready.is_set():
             return False
 
-        with self.buffer_state_condition:
-            buffer_state = self.buffer_state
+        buffer_state = self.get_buffer_state()
 
         if buffer_state == "UNKNOWN":
             self.logger.warning("Replay buffer state is unknown! Buffer stop request dropped.")
@@ -869,17 +873,19 @@ class MegaScript:
                 self.logger.warning("Timed out waiting for replay buffer to finish starting!")
                 return False
 
-            with self.buffer_state_condition:
-                buffer_state = self.buffer_state
+            buffer_state = self.get_buffer_state()
 
         if buffer_state == "OBS_WEBSOCKET_OUTPUT_STOPPED":
             return True
 
+        # are we already in the process of stopping the buffer?
         if buffer_state == "OBS_WEBSOCKET_OUTPUT_STOPPING":
             stopped = self.wait_for_buffer_state(
                 {"OBS_WEBSOCKET_OUTPUT_STOPPED"},
                 self.stop_buffer_timeout
             )
+
+            # did we time out and the buffer still hasn't been stopped?
             if not stopped:
                 self.mark_buffer_state_unknown({"OBS_WEBSOCKET_OUTPUT_STOPPED"})
             return stopped
@@ -893,7 +899,7 @@ class MegaScript:
             self.req.stop_replay_buffer()
         except Exception:
             self.mark_buffer_state_unknown({"OBS_WEBSOCKET_OUTPUT_STOPPED"})
-            raise
+            raise # throw this same exception to our main switcher logic for it to be dealt with there
 
         stopped = self.wait_for_buffer_state({"OBS_WEBSOCKET_OUTPUT_STOPPED"}, self.stop_buffer_timeout)
 
@@ -907,8 +913,7 @@ class MegaScript:
         if not self.profile_ready.is_set() or self.video_reconfiguring.is_set():
             return False
 
-        with self.buffer_state_condition:
-            buffer_state = self.buffer_state
+        buffer_state = self.get_buffer_state()
 
         if buffer_state == "OBS_WEBSOCKET_OUTPUT_STARTED":
             return True
@@ -942,8 +947,7 @@ class MegaScript:
         if current_scene_data is None: return
         current_scene = current_scene_data.scene_name
 
-        with self.buffer_state_condition:
-            buffer_state = self.buffer_state
+        buffer_state = self.get_buffer_state()
 
         now = int(time.time())
 
@@ -960,8 +964,7 @@ class MegaScript:
                 self.logger.warning("Rejecting instant replay request during OBS reconfiguration!")
                 return
 
-            with self.buffer_state_condition:
-                buffer_active = self.buffer_state == "OBS_WEBSOCKET_OUTPUT_STARTED"
+            buffer_active = self.get_buffer_state() == "OBS_WEBSOCKET_OUTPUT_STARTED"
 
             if buffer_active and not self.instant_replay_requested:
                 # set this before sending the request to avoid a callback race
