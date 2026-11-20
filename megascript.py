@@ -9,7 +9,7 @@ from watchdog.observers import Observer
 from send2trash import send2trash
 from dupefilter import DuplicateFilter
 from serializedreqclient import SerializedReqClient
-import win32gui, win32process, time, threading, psutil, shutil, logging, re, os, json, subprocess, websocket
+import win32gui, win32process, win32api, win32con, win32security, time, threading, psutil, shutil, logging, re, os, json, subprocess, websocket
 
 class MegaScript:
 
@@ -74,7 +74,7 @@ class MegaScript:
             "300FPS": ["valorant", "cs2", "siege", "deadlock"],
             "current": ["discord"]
         }
-        self.DEFAULT_PROFILE = "60FPS"
+        self.DEFAULT_PROFILE = "120FPS"
         self.SCENE_AFK_NAME = "Alt Tabbed"
         self.SCENE_GAME_NAME = "Game Capture"
         self.GAME_CAPTURE_NAME = "Capture 0"
@@ -150,7 +150,7 @@ class MegaScript:
 
         self.SFX_RECORD_START = str(Path.joinpath(self.script_path, "assets", "recordingstartbeep.mp3"))
         self.SFX_RECORD_END = str(Path.joinpath(self.script_path, "assets", "recordingendbeep.mp3"))
-        self.SFX_RECORD_ERROR = str(Path.joinpath(self.script_path, "assets", "error.mp3"))
+        self.SFX_ERROR = str(Path.joinpath(self.script_path, "assets", "error.mp3"))
         self.SFX_COMMAND_RECEIVED = str(Path.joinpath(self.script_path, "assets", "commandreceived.mp3"))
 
         self.logger.info("Megascript initialized! Connecting to OBS...")
@@ -210,7 +210,7 @@ class MegaScript:
                             with open(self.commands_path, "w") as f:
                                 json.dump(commands_data, f)
                         except Exception as error:
-                            self.logger.exception("Error while processing command event!")
+                            self.handle_error(error, "Error while processing command event!")
 
         # start observer thread
         self.commands_event = CommandsEvent()
@@ -225,6 +225,11 @@ class MegaScript:
     def establish_connection(self):
         while not self.connected:
             try:
+                obs_pid = self.is_obs_running()
+                if not obs_pid:
+                    self.logger.info(f"OBS not detected, retrying in {self.connect_attempts_interval} seconds...")
+                    time.sleep(self.connect_attempts_interval)
+                    continue
                 # this fixes a potential issue with sharing the same request client instance across threads
                 # SerializedReqClient employs a lock to ensure each request doesn't interfere with one another
                 # i could provide a separate instance of obs.ReqClient per thread, but that would be more annoying to implement 
@@ -263,9 +268,26 @@ class MegaScript:
                     self.buffer_state_condition.notify_all()
 
                 self.connected = True
-            except Exception:
-                self.logger.exception("Could not establish connection to OBS!")
+
+                if not self.is_proc_admin(obs_pid):
+                    self.logger.warning("OBS is not running as administrator! Some functionality might break.")
+                    playsound(self.SFX_ERROR)
+            except Exception as error:
+                self.handle_error(error, "Could not establish connection to OBS!")
                 time.sleep(self.connect_attempts_interval)
+                continue
+
+    def is_obs_running(self):
+        for proc in psutil.process_iter(['name', 'pid']):
+            if proc.info['name'] and proc.info['name'].lower() == 'obs64.exe':
+                return proc.info['pid']
+
+        return None
+    
+    def is_proc_admin(self, pid):
+        process = win32api.OpenProcess(win32con.PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+        token = win32security.OpenProcessToken(process, win32security.TOKEN_QUERY)
+        return win32security.GetTokenInformation(token, win32security.TokenElevation)
 
     def reset_commands_json(self):
         try:
@@ -277,7 +299,7 @@ class MegaScript:
             with open(self.commands_path, "w") as f:
                 json.dump(commands_data, f)
         except Exception as error:
-            self.logger.exception("Error while resetting commands.json!")
+            self.handle_error(error, "Error while resetting commands.json!")
 
     def get_buffer_state(self):
         # use our condition locking mechanism whenever we access the buffer state
@@ -290,7 +312,9 @@ class MegaScript:
 
     ### ERROR HANDLING
 
-    def handle_error(self, error):
+    def handle_error(self, error, msg, warn=False):
+        log_msg = f"{'warning' if warn else 'error'}{f' ({msg})' if msg else ''}: {error}"
+
         if isinstance(error, (
             obserror.OBSSDKTimeoutError, 
             json.JSONDecodeError, 
@@ -300,44 +324,31 @@ class MegaScript:
             BrokenPipeError,
             websocket.WebSocketConnectionClosedException,
         )) or isinstance(error, obserror.OBSSDKRequestError) and error.code == 207:
-            self.handle_connection_lost(error)
+            log_msg = "OBS " + log_msg
+            if self.connected: # ignore this error if we're already trying to reconnect
+                # always record an error even if we're supposed to be a warning, since this forces a reconnect
+                self.logger.error(
+                    log_msg,
+                    exc_info=(type(error), error, error.__traceback__)
+                )
+                self.handle_connection_lost()
         else:
-            self.logger.error(
-                "OBS controller error: %s",
-                error,
-                exc_info=(type(error), error, error.__traceback__)
-            )
+            log_msg = "Megascript " + log_msg
+            if warn:
+                self.logger.warning(
+                    log_msg,
+                    exc_info=(type(error), error, error.__traceback__)
+                )
+            else:
+                self.logger.error(
+                    log_msg,
+                    exc_info=(type(error), error, error.__traceback__)
+                )
 
-    def handle_connection_lost(self, error):
+    def handle_connection_lost(self):
         if self.connected: # only trigger this once so we don't have multiple instances of establish_connection() running
-            self.connected = False
-            self.running = False
-
-            # kill all other threads
-
-            ### AI WRITTEN EXPLANATION FOR THIS CODE
-            # The issue arises because handle_connection_lost is called from within one of the threads (e.g., change_tabbed_text), 
-            # and it attempts to join the same thread that's executing the method, which is not allowed.
-
-            # To fix this, I've added checks to prevent joining the current thread by comparing the thread's ident with threading.current_thread().ident.
-
-            # This ensures that when a thread calls handle_connection_lost, it won't try to join itself. 
-            # The threads will exit their loops naturally when self.running is set to False, and new threads will be started after reconnection.
-            if self.change_tabbed_text_thread and self.change_tabbed_text_thread.ident != threading.current_thread().ident:
-                self.change_tabbed_text_thread.join(timeout=5)
-                self.change_tabbed_text_thread = None
-            if self.switcher_thread and self.switcher_thread.ident != threading.current_thread().ident:
-                self.switcher_thread.join(timeout=5)
-                self.switcher_thread = None
-
-            if self.commands_observer:
-                self.commands_observer.stop()
-
-            if self.commands_observer and self.commands_observer.ident != threading.current_thread().ident:
-                self.commands_observer.join(timeout=5)
-                self.commands_observer = None
-            
-            self.logger.warning("OBS connection failed, reconnecting...")
+            self.stop_script()
+            self.logger.error("OBS connection failed, reconnecting...")
 
             self.establish_connection()
             self.reset_commands_json()
@@ -357,6 +368,32 @@ class MegaScript:
 
             self.logger.info(f"Reconnected to OBS!")
 
+    def stop_script(self):
+        self.running = False
+        self.connected = False
+
+        ### AI WRITTEN EXPLANATION FOR THIS CODE
+        # The issue arises because handle_connection_lost is called from within one of the threads (e.g., change_tabbed_text), 
+        # and it attempts to join the same thread that's executing the method, which is not allowed.
+
+        # To fix this, I've added checks to prevent joining the current thread by comparing the thread's ident with threading.current_thread().ident.
+
+        # This ensures that when a thread calls handle_connection_lost, it won't try to join itself. 
+        # The threads will exit their loops naturally when self.running is set to False, and new threads will be started after reconnection.
+        if self.change_tabbed_text_thread and self.change_tabbed_text_thread.ident != threading.current_thread().ident:
+            self.change_tabbed_text_thread.join(timeout=5)
+            self.change_tabbed_text_thread = None
+            
+        if self.switcher_thread and self.switcher_thread.ident != threading.current_thread().ident:
+            self.switcher_thread.join(timeout=5)
+            self.switcher_thread = None
+
+        if self.commands_observer:
+            self.commands_observer.stop()
+
+        if self.commands_observer and self.commands_observer.ident != threading.current_thread().ident:
+            self.commands_observer.join(timeout=5)
+            self.commands_observer = None
 
     ### END ERROR HANDLING
 
@@ -458,7 +495,7 @@ class MegaScript:
                 send2trash(filepath)
                 self.logger.info(f"Sent '{filepath}' to trash after user exited instant replay successfully!")
             except Exception as error:
-                self.logger.exception(f"Error while trying to play back instant replay '{filepath}'!")
+                self.handle_error(error, f"Error while trying to play back instant replay '{filepath}'!")
         else:
             try:
                 if valid_windows:
@@ -500,12 +537,11 @@ class MegaScript:
                     self.logger.warning(f"Could not move file '{filepath}'. No application was detected as valid.")
 
             except Exception as error:
-                playsound(self.SFX_RECORD_ERROR)
-                self.logger.exception(error)
+                playsound(self.SFX_ERROR)
                 if moved:
-                    self.logger.warning(f"Could not move file '{filepath}'. File was moved from original location to '{correct_dir}'.")
+                    self.handle_error(error, f"Could not move file '{filepath}'. File was moved from original location to '{correct_dir}'.", warn=True)
                 else:
-                    self.logger.warning(f"Could not move file '{filepath}'. File was NOT moved from original location.")
+                    self.handle_error(error, f"Could not move file '{filepath}'. File was NOT moved from original location.", warn=True)
 
             self.logger.info(f"Succesfully saved original file '{filepath}' at '{correct_dir}'.")
             playsound(self.SFX_RECORD_END)
@@ -548,7 +584,7 @@ class MegaScript:
                 exe_name = Path(proc.exe()).stem + ".exe"
                 class_name = win32gui.GetClassName(hWnd)
             except Exception as error:
-                self.logger.warning("Could not setup data for window correctly!", exc_info=error)
+                self.handle_error(error, "Could not setup data for window correctly!", warn=True)
                 return
             obs_window_str = f"{window_name}:{class_name}:{exe_name}"
             special_scene = None
@@ -605,7 +641,7 @@ class MegaScript:
         try:
             win32gui.EnumWindows(win_enum_handler, valid_windows_list)
         except Exception as error:
-            self.logger.exception("Error while enumerating windows to use in valid windows list!")
+            self.handle_error(error, "Error while enumerating windows to use in valid windows list!")
             return False
         
         return valid_windows_list
@@ -614,7 +650,7 @@ class MegaScript:
         interval = self.switcher_poll_interval
 
         while self.running:
-            if not self.profile_ready.is_set():
+            if not self.profile_ready.is_set() or not self.switcher_active:
                 time.sleep(interval)
                 continue
 
@@ -633,7 +669,7 @@ class MegaScript:
                         self.manage_buffer_state()
 
             except Exception as error:
-                self.handle_error(error)
+                self.handle_error(error, "Error while in main switcher thread!")
 
             time.sleep(interval)
 
@@ -769,8 +805,8 @@ class MegaScript:
             try:
                 self.req.set_current_profile(new_profile_name)
 
-            except Exception:
-                self.logger.exception("Failed to request OBS profile change!")
+            except Exception as error:
+                self.handle_error(error, "Failed to request OBS profile change!")
                 return False
 
             # wait for CurrentProfileChanged to set profile_ready again
@@ -975,13 +1011,13 @@ class MegaScript:
                     self.instant_replay_requested = False
                     raise
             else:
-                playsound(self.SFX_RECORD_ERROR)
+                playsound(self.SFX_ERROR)
                 if not buffer_active:
                     self.logger.warning("Cannot show instant replay; replay buffer inactive!")
                 elif self.instant_replay_requested:
                     self.logger.warning("Cannot show instant replay; one was already requested recently!")
         except Exception as error:
-            self.handle_error(error)
+            self.handle_error(error, "Error while trying to show instant replay!")
 
     ### END REPLAY BUFFER SPECIFIC MANAGERS
 
@@ -1014,10 +1050,10 @@ class MegaScript:
 
                 if current_scene == self.SCENE_AFK_NAME:
                     self.req.set_input_settings("Alt Tabbed Text", {
-                        "text": f"Alt Tabbed {next(self.emote_gen)}"
+                        "text": f"alt tabbed {next(self.emote_gen)}"
                     }, True)
             except Exception as error:
-                self.handle_error(error)
+                self.handle_error(error, "Error while changing alt tabbed text!")
 
             time.sleep(interval)
             continue
@@ -1042,14 +1078,8 @@ class MegaScript:
             while True:
                 time.sleep(1)
         except KeyboardInterrupt:
-            self.logger.info("Shutting down due to KeyboardInterrupt...")
-            self.running = False
-            self.commands_observer.stop()
-            self.commands_observer.join()
-            if self.change_tabbed_text_thread:
-                self.change_tabbed_text_thread.join(timeout=5)
-            if self.switcher_thread:
-                self.switcher_thread.join(timeout=5)
+            self.logger.info("Shutting down...")
+            self.stop_script()
             self.logger.info("Shutdown complete.")
 
 
