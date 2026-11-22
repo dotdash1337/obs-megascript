@@ -301,11 +301,6 @@ class MegaScript:
         except Exception as error:
             self.handle_error(error, "Error while resetting commands.json!")
 
-    def get_buffer_state(self):
-        # use our condition locking mechanism whenever we access the buffer state
-        with self.buffer_state_condition:
-            return self.buffer_state
-
     # END INITIALIZATION AND HELPER FUNCTIONS
 
 
@@ -394,6 +389,15 @@ class MegaScript:
         if self.commands_observer and self.commands_observer.ident != threading.current_thread().ident:
             self.commands_observer.join(timeout=5)
             self.commands_observer = None
+
+    def log_obs_profile_fps(self, reason):
+        profile = self.req.get_profile_list()
+        video = self.req.get_video_settings()
+        self.logger.info(
+            f"{reason}: " +
+            f"Profile={profile.current_profile_name}, " +
+            f"FPS={video.fps_numerator}/{video.fps_denominator}"
+        )
 
     ### END ERROR HANDLING
 
@@ -779,15 +783,18 @@ class MegaScript:
             # ensure we can read our profile data first
             profile_data = self.req.get_profile_list()
             if profile_data is None:
+                self.logger.warning("Unable to read profile data from OBS while attempting to switch profiles!")
                 return False
 
             current_profile_name = profile_data.current_profile_name
             profile_list = profile_data.profiles
 
             if new_profile_name == current_profile_name:
+                self.log_obs_profile_fps(f"Not switching to {new_profile_name}! Current profile is already {current_profile_name}!")
                 return True
 
             if new_profile_name not in profile_list:
+                self.logger.warning(f"Not switching to {new_profile_name}! Profile not found in OBS profile list containing: '{profile_list}'.")
                 return False
 
             # wait for the buffer to stop before switching
@@ -816,7 +823,7 @@ class MegaScript:
 
             time.sleep(self.profile_settle_delay)
 
-            self.logger.info(f"Updated profile from {current_profile_name} to {new_profile_name}.")
+            self.log_obs_profile_fps(f"Updated profile from {current_profile_name} to {new_profile_name}.")
 
             return True
 
@@ -886,6 +893,11 @@ class MegaScript:
             if self.buffer_state not in expected_states:
                 self.buffer_state = "UNKNOWN"
 
+    def get_buffer_state(self):
+        # use our condition locking mechanism whenever we access the buffer state
+        with self.buffer_state_condition:
+            return self.buffer_state
+
     def stop_replay_buffer(self):
         if not self.profile_ready.is_set():
             return False
@@ -950,14 +962,12 @@ class MegaScript:
             return False
 
         buffer_state = self.get_buffer_state()
-
         if buffer_state == "OBS_WEBSOCKET_OUTPUT_STARTED":
             return True
-
         if buffer_state != "OBS_WEBSOCKET_OUTPUT_STOPPED":
             return False
 
-        self.logger.info("Starting replay buffer.")
+        self.log_obs_profile_fps("Starting replay buffer.")
         try:
             self.req.start_replay_buffer()
         except Exception:
@@ -968,7 +978,6 @@ class MegaScript:
             {"OBS_WEBSOCKET_OUTPUT_STARTED"},
             self.buffer_start_timeout
         )
-
         if not started:
             self.mark_buffer_state_unknown({"OBS_WEBSOCKET_OUTPUT_STARTED"})
             self.logger.warning("Timed out waiting for replay buffer to start.")
